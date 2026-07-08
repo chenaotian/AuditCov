@@ -16,6 +16,7 @@ Current baseline:
 - Keep changes scoped to the current request.
 - Commit completed updates with a clear commit message.
 - Leave the working tree clean after each completed task unless the user asks otherwise.
+- When updating `skills/auditcov/SKILL.md`, update the human-readable Chinese mirror at `skills/auditcov/SKILL.zh-CN.md` in the same change.
 
 ## Implementation Direction
 

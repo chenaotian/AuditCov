@@ -9,7 +9,7 @@ AuditCov tracks objective read coverage: complete source-code lines returned to 
 
 ## Activation Rule
 
-只有当用户点名使用该skill / mcp的时候才使用，否则不要使用。
+Use AuditCov only when the user explicitly asks for the AuditCov skill or AuditCov MCP.
 
 Treat these as explicit activation:
 
@@ -19,9 +19,15 @@ Treat these as explicit activation:
 
 Do not use AuditCov for a normal security review, code audit, bug hunt, or repository exploration unless the user explicitly asks for AuditCov or audit coverage.
 
+## Initialization Rule
+
+Call `auditcov_init_project` exactly once when the current request first activates AuditCov for the thread. Do not call it repeatedly to refresh state, reset coverage, or improve the denominator. If AuditCov is already initialized for the current thread, continue using the existing project. Reinitialize only when the user explicitly starts a new AuditCov audit scope.
+
+After initialization, do not shrink or replace the target paths to make coverage easier to reach.
+
 ## Coverage Goal Rule
 
-如果用户明确要求审计覆盖率，如：审计代码直到覆盖80%/确保审计覆盖率达到80%这种话术，则需要使用goal设置一个目标，一直审计直到完成目标，如果用户没有明确要求一定要审计达到特定覆盖率，则不受影响，覆盖率仅供用户参考，不作为目标，审计节奏由你自由掌控
+If the user explicitly asks to audit until a coverage target is reached, such as auditing until 80% coverage or ensuring audit coverage reaches 80%, create a goal and keep auditing until that target is complete. If the user does not request a specific coverage target, treat coverage as informational only and let the audit proceed at the normal pace.
 
 When a concrete coverage threshold is requested:
 
@@ -31,6 +37,12 @@ When a concrete coverage threshold is requested:
 4. Do not mark the goal complete until the threshold is actually reached, or until a real blocker prevents progress.
 
 When no concrete threshold is requested, use coverage as a reference signal only. Do not turn coverage into an implicit completion gate.
+
+## Code Reading Rule
+
+After AuditCov is activated, all source-code reading for the audit must go through `auditcov_read_file`. Do not use shell commands or other tools to read source-code contents, including commands such as `cat`, `type`, `Get-Content`, `sed -n`, `head`, `tail`, `less`, or search commands that print matching code lines.
+
+Shell commands may be used only for non-code discovery, such as listing directory names, finding file paths, checking file metadata, or searching for filenames. If a search would expose source-code snippets, use it only to identify candidate files and then read the relevant ranges with `auditcov_read_file`.
 
 ## MCP Workflow
 
@@ -44,8 +56,8 @@ Use only the AuditCov MCP tools for reads that should count toward objective cov
 Recommended sequence:
 
 1. Determine the repository root and target paths from the user request. Do not shrink the target denominator to improve coverage.
-2. Call `auditcov_init_project` once for the chosen scope.
-3. Use shell commands only for discovery and search. Shell reads do not count toward AuditCov objective read coverage.
+2. Call `auditcov_init_project` once for the chosen scope when AuditCov is first activated.
+3. Use shell commands only for discovery that does not reveal source-code lines.
 4. Use `auditcov_read_file` for source code that should count as read coverage. If the result is truncated, continue from `next_start_line`.
 5. Use `auditcov_get_coverage` and `auditcov_get_file_detail` to choose remaining unread files or ranges.
 6. Report coverage as objective read coverage, not as proof that the audit is complete.

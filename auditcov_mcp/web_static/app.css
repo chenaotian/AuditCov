@@ -88,6 +88,50 @@ button {
   display: flex;
 }
 
+.settings-panel {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #3c3d3d;
+  border-radius: 6px;
+  background: #222324;
+  padding: 10px;
+}
+
+.settings-title {
+  color: #f4c95d;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.settings-label {
+  color: #bbb2a2;
+  font-size: 12px;
+}
+
+.path-input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid #4f504f;
+  border-radius: 5px;
+  background: #171819;
+  color: #f8f4ea;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 7px 8px;
+}
+
+.path-input:focus {
+  border-color: #f4c95d;
+  outline: none;
+}
+
+.path-input:disabled {
+  color: #8d877c;
+  cursor: not-allowed;
+}
+
 .command-button {
   width: 100%;
   min-height: 36px;
@@ -100,6 +144,29 @@ button {
 
 .command-button:hover {
   border-color: #f4c95d;
+}
+
+.command-button:disabled {
+  border-color: #444;
+  color: #817b70;
+  cursor: not-allowed;
+}
+
+.settings-meta,
+.settings-message {
+  overflow-wrap: anywhere;
+  color: #b8b0a0;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.settings-message.ok {
+  color: #9fd0b6;
+}
+
+.settings-message.error {
+  color: #f0a296;
 }
 
 .project-list {

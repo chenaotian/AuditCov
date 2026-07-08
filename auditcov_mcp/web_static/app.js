@@ -3,10 +3,16 @@ const state = {
   selectedThreadId: null,
   selectedFilePath: null,
   project: null,
+  settings: null,
 };
 
 const els = {
   refreshButton: document.getElementById("refreshButton"),
+  workdirForm: document.getElementById("workdirForm"),
+  workdirInput: document.getElementById("workdirInput"),
+  workdirButton: document.getElementById("workdirButton"),
+  settingsMeta: document.getElementById("settingsMeta"),
+  settingsMessage: document.getElementById("settingsMessage"),
   projectList: document.getElementById("projectList"),
   projectKicker: document.getElementById("projectKicker"),
   projectTitle: document.getElementById("projectTitle"),
@@ -19,10 +25,15 @@ const els = {
 };
 
 els.refreshButton.addEventListener("click", () => loadProjects());
+els.workdirForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  moveWorkdir();
+});
 
 loadProjects();
 
 async function loadProjects() {
+  await loadSettings();
   const data = await fetchJson("/api/projects");
   state.projects = data.projects || [];
   renderProjectList();
@@ -35,6 +46,32 @@ async function loadProjects() {
   const selectedExists = state.projects.some((project) => project.thread_id === state.selectedThreadId);
   const nextThreadId = selectedExists ? state.selectedThreadId : state.projects[0].thread_id;
   await loadProject(nextThreadId);
+}
+
+async function loadSettings() {
+  state.settings = await fetchJson("/api/settings");
+  renderSettings();
+}
+
+async function moveWorkdir() {
+  const workDir = els.workdirInput.value.trim();
+  if (!workDir) {
+    setSettingsMessage("Work directory cannot be empty.", "error");
+    return;
+  }
+
+  els.workdirButton.disabled = true;
+  setSettingsMessage("Moving current AuditCov state...", "");
+  try {
+    state.settings = await postJson("/api/settings/workdir", { work_dir: workDir });
+    renderSettings();
+    setSettingsMessage(state.settings.moved ? "Work directory moved." : "Work directory unchanged.", "ok");
+    await loadProjects();
+  } catch (error) {
+    setSettingsMessage(error.message || "Work directory cannot be changed right now.", "error");
+  } finally {
+    els.workdirButton.disabled = !state.settings?.can_update_work_dir;
+  }
 }
 
 async function loadProject(threadId) {
@@ -61,6 +98,41 @@ async function fetchJson(url) {
     throw new Error(data.error || `Request failed: ${response.status}`);
   }
   return data;
+}
+
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) {
+    throw new Error(data.error || `Request failed: ${response.status}`);
+  }
+  return data;
+}
+
+function renderSettings() {
+  const settings = state.settings;
+  if (!settings) {
+    return;
+  }
+
+  els.workdirInput.value = settings.work_dir || "";
+  els.workdirInput.disabled = !settings.can_update_work_dir;
+  els.workdirButton.disabled = !settings.can_update_work_dir;
+  els.settingsMeta.textContent = `DB ${settings.db_path}`;
+  if (!settings.can_update_work_dir) {
+    setSettingsMessage(`Locked by ${settings.override_reason}.`, "error");
+  } else if (!els.settingsMessage.textContent) {
+    setSettingsMessage("Default is the install directory workspace.", "");
+  }
+}
+
+function setSettingsMessage(message, kind) {
+  els.settingsMessage.textContent = message;
+  els.settingsMessage.className = `settings-message${kind ? ` ${kind}` : ""}`;
 }
 
 function renderProjectList() {

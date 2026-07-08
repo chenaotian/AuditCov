@@ -33,7 +33,7 @@ Rollout bypass detection is implemented as best-effort internal logging, not as 
 python -m auditcov_mcp.server
 ```
 
-The server stores state in `.auditcov/auditcov.sqlite3` under the process working directory by default. Set `AUDITCOV_DB` to use another database path.
+The server stores state in `.auditcov/auditcov.sqlite3` under the installation/project directory by default. Set `AUDITCOV_DB` to use an explicit database path, or `AUDITCOV_WORK_DIR` to use an explicit work directory.
 
 ## Web Viewer
 
@@ -57,6 +57,8 @@ The viewer reads the same SQLite database as the MCP server. It shows:
 - per-file covered and uncovered source lines
 
 Set `AUDITCOV_DB` for both the MCP server and web viewer when they should share a database outside the default `.auditcov/auditcov.sqlite3` path.
+
+The Web viewer also has a Workspace panel for changing the AuditCov work directory. When changed, AuditCov moves the current work directory contents to the new directory and writes `.auditcov-config.json` next to the installed package. If another running AuditCov process has the database or logs open, the move fails and the UI shows that the directory cannot be changed right now.
 
 ## Task Identity
 

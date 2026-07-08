@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from auditcov_mcp.paths import default_db_path as configured_default_db_path
+
 MAX_RESPONSE_BYTES = 40 * 1024
 
 CODE_EXTENSIONS = {
@@ -692,10 +694,7 @@ class AuditCovStore:
 
 
 def default_db_path() -> Path:
-    configured = os.environ.get("AUDITCOV_DB")
-    if configured:
-        return Path(configured).expanduser()
-    return Path.cwd() / ".auditcov" / "auditcov.sqlite3"
+    return configured_default_db_path()
 
 
 def utc_now() -> str:

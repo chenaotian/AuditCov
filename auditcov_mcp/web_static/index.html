@@ -19,6 +19,14 @@
         <div class="sidebar-actions">
           <button id="refreshButton" class="command-button" type="button">Refresh</button>
         </div>
+        <form id="workdirForm" class="settings-panel">
+          <div class="settings-title">Workspace</div>
+          <label class="settings-label" for="workdirInput">Work directory</label>
+          <input id="workdirInput" class="path-input" type="text" autocomplete="off" spellcheck="false">
+          <button id="workdirButton" class="command-button" type="submit">Move directory</button>
+          <div id="settingsMeta" class="settings-meta"></div>
+          <div id="settingsMessage" class="settings-message"></div>
+        </form>
         <div id="projectList" class="project-list"></div>
       </aside>
 

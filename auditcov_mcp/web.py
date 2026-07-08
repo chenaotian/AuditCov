@@ -8,15 +8,21 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from auditcov_mcp import __version__
+from auditcov_mcp.paths import WorkDirError, change_work_dir, workdir_settings
 from auditcov_mcp.store import AuditCovError, AuditCovStore, default_db_path
 
 STATIC_DIR = Path(__file__).parent / "web_static"
 
 
 class AuditCovWebServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], db_path: Path) -> None:
+    def __init__(self, server_address: tuple[str, int], db_path: Path | None) -> None:
         super().__init__(server_address, AuditCovWebHandler)
-        self.db_path = db_path
+        self.explicit_db_path = db_path
+
+    def db_path(self) -> Path:
+        if self.explicit_db_path is not None:
+            return self.explicit_db_path.expanduser().resolve()
+        return default_db_path()
 
 
 class AuditCovWebHandler(BaseHTTPRequestHandler):
@@ -34,6 +40,9 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/health":
                 self._send_json({"ok": True, "version": __version__})
                 return
+            if parsed.path == "/api/settings":
+                self._send_json(workdir_settings(explicit_db_path=self.server.explicit_db_path))
+                return
             if parsed.path == "/api/projects":
                 self._with_store(lambda store: store.list_projects())
                 return
@@ -43,6 +52,29 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, status=404)
         except AuditCovError as exc:
             self._send_json({"error": str(exc)}, status=400)
+        except WorkDirError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+        except OSError as exc:
+            self._send_json({"error": str(exc)}, status=500)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/api/settings/workdir":
+                payload = self._read_json_body()
+                work_dir = payload.get("work_dir")
+                if not isinstance(work_dir, str) or not work_dir.strip():
+                    self._send_json({"error": "work_dir must be a non-empty string"}, status=400)
+                    return
+                if self.server.explicit_db_path is not None:
+                    raise WorkDirError("cannot change work directory when web viewer uses --db")
+                self._send_json(change_work_dir(work_dir))
+                return
+            self._send_json({"error": "not found"}, status=404)
+        except json.JSONDecodeError:
+            self._send_json({"error": "request body must be valid JSON"}, status=400)
+        except WorkDirError as exc:
+            self._send_json({"error": str(exc)}, status=409)
         except OSError as exc:
             self._send_json({"error": str(exc)}, status=500)
 
@@ -65,11 +97,23 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
         self._with_store(lambda store: store.get_project_tree(thread_id))
 
     def _with_store(self, callback):
-        store = AuditCovStore(self.server.db_path)
+        store = AuditCovStore(self.server.db_path())
         try:
             self._send_json(callback(store))
         finally:
             store.close()
+
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length > 65536:
+            raise WorkDirError("request body is too large")
+        raw = self.rfile.read(length)
+        if not raw:
+            return {}
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise WorkDirError("request body must be a JSON object")
+        return payload
 
     def _send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -105,11 +149,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the AuditCov web coverage viewer.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--db", type=Path, default=default_db_path())
+    parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--quiet", action="store_true", help="Do not print the startup URL.")
     args = parser.parse_args()
 
-    server = AuditCovWebServer((args.host, args.port), args.db.expanduser())
+    server = AuditCovWebServer((args.host, args.port), args.db.expanduser() if args.db else None)
     if not args.quiet:
         print(f"AuditCov web viewer: http://{args.host}:{args.port}", flush=True)
     try:

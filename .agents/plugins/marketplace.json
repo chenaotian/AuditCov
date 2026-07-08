@@ -1,0 +1,20 @@
+{
+    "name":  "auditcov-local",
+    "interface":  {
+                      "displayName":  "AuditCov Local"
+                  },
+    "plugins":  [
+                    {
+                        "name":  "auditcov",
+                        "source":  {
+                                       "source":  "local",
+                                       "path":  "./plugins/auditcov"
+                                   },
+                        "policy":  {
+                                       "installation":  "AVAILABLE",
+                                       "authentication":  "ON_INSTALL"
+                                   },
+                        "category":  "Productivity"
+                    }
+                ]
+}

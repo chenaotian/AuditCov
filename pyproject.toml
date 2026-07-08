@@ -8,7 +8,11 @@ dependencies = []
 
 [project.scripts]
 auditcov-mcp = "auditcov_mcp.server:main"
+auditcov-web = "auditcov_mcp.web:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.package-data]
+auditcov_mcp = ["web_static/*.html", "web_static/*.css", "web_static/*.js"]

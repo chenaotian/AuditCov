@@ -122,6 +122,75 @@ class AuditCovStore:
     def close(self) -> None:
         self.conn.close()
 
+    def list_projects(self) -> dict[str, Any]:
+        rows = self.conn.execute(
+            "SELECT * FROM tasks ORDER BY created_at DESC"
+        ).fetchall()
+        return {
+            "db_path": str(self.db_path),
+            "projects": [self._task_summary(row) for row in rows],
+        }
+
+    def get_project_tree(self, thread_id: str) -> dict[str, Any]:
+        task = self._require_task(thread_id)
+        summary = self._task_summary(task)
+        files = self._files_for_scope(thread_id, "project", None)
+        tree = build_tree(
+            [
+                {
+                    "path": row["path"],
+                    "line_count": int(row["line_count"]),
+                    **self._file_coverage_values(thread_id, row["path"]),
+                }
+                for row in files
+            ],
+            Path(task["project_root"]).name or str(task["project_root"]),
+        )
+        return {**summary, "tree": tree}
+
+    def get_file_view(self, thread_id: str, path: str) -> dict[str, Any]:
+        context = TaskContext(thread_id=thread_id)
+        task = self._require_task(thread_id)
+        rel_path = self._normalize_snapshot_file_path(task, path)
+        file_row = self._get_file(thread_id, rel_path)
+        if file_row is None:
+            raise AuditCovError(f"path is not part of the frozen target snapshot: {path}")
+
+        detail = self.get_file_detail(context, rel_path)
+        ranges = self._covered_ranges(thread_id, rel_path)
+        abs_path = Path(task["project_root"]) / Path(rel_path)
+        current_digest = hashlib.sha256()
+        current_line_count = 0
+        lines = []
+        range_index = 0
+
+        with abs_path.open("rb") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                current_digest.update(raw_line)
+                current_line_count += 1
+                while range_index < len(ranges) and line_number > ranges[range_index][1]:
+                    range_index += 1
+                covered = (
+                    range_index < len(ranges)
+                    and ranges[range_index][0] <= line_number <= ranges[range_index][1]
+                )
+                lines.append(
+                    {
+                        "number": line_number,
+                        "text": raw_line.decode("utf-8", errors="replace").rstrip("\r\n"),
+                        "covered": covered,
+                    }
+                )
+
+        return {
+            **detail,
+            "content_sha256": file_row["content_sha256"],
+            "current_sha256": current_digest.hexdigest(),
+            "content_changed": current_digest.hexdigest() != file_row["content_sha256"],
+            "current_line_count": current_line_count,
+            "lines": lines,
+        }
+
     def init_project(
         self, context: TaskContext, project_root: str, target_paths: list[str]
     ) -> dict[str, Any]:
@@ -372,6 +441,35 @@ class AuditCovStore:
         return self.conn.execute(
             "SELECT * FROM files WHERE thread_id = ? AND path = ?", (thread_id, path)
         ).fetchone()
+
+    def _task_summary(self, task: sqlite3.Row) -> dict[str, Any]:
+        coverage = self.get_coverage(TaskContext(thread_id=task["thread_id"]))
+        target_paths = json.loads(task["target_paths_json"])
+        return {
+            "thread_id": task["thread_id"],
+            "project_root": task["project_root"],
+            "project_label": Path(task["project_root"]).name or task["project_root"],
+            "target_paths": target_paths,
+            "snapshot_id": task["snapshot_id"],
+            "created_at": task["created_at"],
+            "max_response_bytes": int(task["max_response_bytes"]),
+            **coverage,
+        }
+
+    def _file_coverage_values(self, thread_id: str, path: str) -> dict[str, Any]:
+        file_row = self._get_file(thread_id, path)
+        if file_row is None:
+            raise AuditCovError(f"path is not part of the frozen target snapshot: {path}")
+        total_lines = int(file_row["line_count"])
+        ranges = self._covered_ranges(thread_id, path)
+        covered_lines = sum(end - start + 1 for start, end in ranges)
+        return {
+            "covered_lines": covered_lines,
+            "total_lines": total_lines,
+            "percent": percent(covered_lines, total_lines),
+            "covered_files": 1 if covered_lines else 0,
+            "total_files": 1,
+        }
 
     def _normalize_target_paths(self, root: Path, target_paths: list[str]) -> list[str]:
         normalized = set()
@@ -658,3 +756,84 @@ def is_probably_binary(path: Path) -> bool:
     with path.open("rb") as handle:
         chunk = handle.read(4096)
     return b"\0" in chunk
+
+
+def build_tree(files: list[dict[str, Any]], root_name: str) -> dict[str, Any]:
+    root = new_tree_node("directory", root_name, None)
+    nodes = {"": root}
+
+    for file_info in sorted(files, key=lambda item: item["path"]):
+        parts = file_info["path"].split("/")
+        parent_path = ""
+        for index, part in enumerate(parts[:-1], start=1):
+            dir_path = "/".join(parts[:index])
+            if dir_path not in nodes:
+                node = new_tree_node("directory", part, dir_path)
+                nodes[dir_path] = node
+                nodes[parent_path]["children"].append(node)
+            parent_path = dir_path
+
+        file_node = new_tree_node("file", parts[-1], file_info["path"])
+        apply_coverage(file_node, file_info)
+        nodes[parent_path]["children"].append(file_node)
+
+        for index in range(0, len(parts)):
+            ancestor = "/".join(parts[:index])
+            apply_coverage_delta(
+                nodes[ancestor],
+                file_info["covered_lines"],
+                file_info["total_lines"],
+                1 if file_info["covered_lines"] else 0,
+                1,
+            )
+
+    sort_tree(root)
+    finalize_tree(root)
+    return root
+
+
+def new_tree_node(node_type: str, name: str, path: str | None) -> dict[str, Any]:
+    return {
+        "type": node_type,
+        "name": name,
+        "path": path,
+        "covered_lines": 0,
+        "total_lines": 0,
+        "percent": 100.0,
+        "covered_files": 0,
+        "total_files": 0,
+        "children": [],
+    }
+
+
+def apply_coverage(node: dict[str, Any], values: dict[str, Any]) -> None:
+    node["covered_lines"] = values["covered_lines"]
+    node["total_lines"] = values["total_lines"]
+    node["percent"] = values["percent"]
+    node["covered_files"] = values["covered_files"]
+    node["total_files"] = values["total_files"]
+
+
+def apply_coverage_delta(
+    node: dict[str, Any],
+    covered_lines: int,
+    total_lines: int,
+    covered_files: int,
+    total_files: int,
+) -> None:
+    node["covered_lines"] += covered_lines
+    node["total_lines"] += total_lines
+    node["covered_files"] += covered_files
+    node["total_files"] += total_files
+
+
+def sort_tree(node: dict[str, Any]) -> None:
+    node["children"].sort(key=lambda item: (item["type"] == "file", item["name"].lower()))
+    for child in node["children"]:
+        sort_tree(child)
+
+
+def finalize_tree(node: dict[str, Any]) -> None:
+    node["percent"] = percent(node["covered_lines"], node["total_lines"])
+    for child in node["children"]:
+        finalize_tree(child)

@@ -63,6 +63,36 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(coverage["total_lines"], 4)
         self.assertEqual(coverage["percent"], 75.0)
 
+    def test_list_projects_and_tree_include_coverage(self) -> None:
+        self.write("src/a.py", "one\ntwo\n")
+        self.write("src/nested/b.py", "three\nfour\n")
+        self.store.init_project(self.context, str(self.root), ["src"])
+        self.store.read_file(self.context, "src/a.py", 1, 1)
+        self.store.read_file(self.context, "src/nested/b.py", 1, 2)
+
+        projects = self.store.list_projects()
+        tree = self.store.get_project_tree("thread-1")["tree"]
+
+        self.assertEqual(len(projects["projects"]), 1)
+        self.assertEqual(projects["projects"][0]["covered_lines"], 3)
+        self.assertEqual(projects["projects"][0]["total_lines"], 4)
+        self.assertEqual(tree["covered_lines"], 3)
+        self.assertEqual(tree["total_lines"], 4)
+        self.assertEqual(tree["children"][0]["name"], "src")
+        self.assertEqual(tree["children"][0]["percent"], 75.0)
+
+    def test_get_file_view_marks_lines(self) -> None:
+        self.write("src/a.py", "one\ntwo\nthree\n")
+        self.store.init_project(self.context, str(self.root), ["src"])
+        self.store.read_file(self.context, "src/a.py", 2, 3)
+
+        view = self.store.get_file_view("thread-1", "src/a.py")
+
+        self.assertEqual(view["covered_ranges"], ["2-3"])
+        self.assertFalse(view["lines"][0]["covered"])
+        self.assertTrue(view["lines"][1]["covered"])
+        self.assertTrue(view["lines"][2]["covered"])
+
     def test_read_file_truncates_on_complete_line_boundary(self) -> None:
         line = "x" * 1000 + "\n"
         self.write("src/large.py", line * 100)

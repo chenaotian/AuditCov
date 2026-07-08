@@ -16,6 +16,7 @@ Implemented MCP tools:
 - `auditcov_read_file`
 - `auditcov_get_coverage`
 - `auditcov_get_file_detail`
+- web coverage viewer
 
 Deferred from v0:
 
@@ -23,7 +24,6 @@ Deferred from v0:
 - file discovery tracking
 - subjective coverage reporting
 - rollout-based coverage reconstruction
-- web coverage viewer
 
 Rollout bypass detection is implemented as best-effort internal logging, not as a model-facing MCP tool.
 
@@ -34,6 +34,29 @@ python -m auditcov_mcp.server
 ```
 
 The server stores state in `.auditcov/auditcov.sqlite3` under the process working directory by default. Set `AUDITCOV_DB` to use another database path.
+
+## Web Viewer
+
+Run the coverage UI:
+
+```powershell
+python -m auditcov_mcp.web --host 127.0.0.1 --port 8765
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765
+```
+
+The viewer reads the same SQLite database as the MCP server. It shows:
+
+- all initialized Codex thread projects
+- project-level objective read coverage
+- target directory and file coverage
+- per-file covered and uncovered source lines
+
+Set `AUDITCOV_DB` for both the MCP server and web viewer when they should share a database outside the default `.auditcov/auditcov.sqlite3` path.
 
 ## Task Identity
 

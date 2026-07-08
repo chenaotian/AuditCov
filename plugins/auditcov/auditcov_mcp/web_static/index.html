@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AuditCov</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-row">
+          <div class="brand-mark">AC</div>
+          <div>
+            <div class="brand-name">AuditCov</div>
+            <div class="brand-subtitle">Objective read coverage</div>
+          </div>
+        </div>
+        <div class="sidebar-actions">
+          <button id="refreshButton" class="command-button" type="button">Refresh</button>
+        </div>
+        <form id="workdirForm" class="settings-panel">
+          <div class="settings-title">Workspace</div>
+          <label class="settings-label" for="workdirInput">Work directory</label>
+          <input id="workdirInput" class="path-input" type="text" autocomplete="off" spellcheck="false">
+          <button id="workdirButton" class="command-button" type="submit">Move directory</button>
+          <div id="settingsMeta" class="settings-meta"></div>
+          <div id="settingsMessage" class="settings-message"></div>
+        </form>
+        <div id="projectList" class="project-list"></div>
+      </aside>
+
+      <main class="workspace">
+        <section class="top-strip">
+          <div>
+            <div id="projectKicker" class="kicker">No project selected</div>
+            <h1 id="projectTitle">Audit coverage viewer</h1>
+          </div>
+          <div id="projectMeta" class="meta-line"></div>
+        </section>
+
+        <section id="metricGrid" class="metric-grid"></section>
+        <section id="threadSelector" class="thread-selector empty-state">Select a project root to choose sessions.</section>
+
+        <section class="work-area">
+          <div class="tree-panel">
+            <div class="panel-title">Targets</div>
+            <div id="treeView" class="tree-view empty-state">No initialized projects found.</div>
+          </div>
+          <div class="file-panel">
+            <div class="file-toolbar">
+              <div>
+                <div class="panel-title">File coverage</div>
+                <div id="filePath" class="file-path">Select a file from the target tree.</div>
+              </div>
+              <div id="fileStats" class="file-stats"></div>
+            </div>
+            <div id="codeView" class="code-view empty-state">Covered lines will appear with a solid left rail.</div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

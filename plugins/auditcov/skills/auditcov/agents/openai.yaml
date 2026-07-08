@@ -1,0 +1,4 @@
+interface:
+  display_name: "AuditCov"
+  short_description: "Track objective read coverage for code audits"
+  default_prompt: "Use AuditCov to audit until objective read coverage reaches 80%."

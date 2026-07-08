@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "auditcov": {
+      "command": "python",
+      "args": ["-m", "auditcov_mcp.server"],
+      "cwd": ".",
+      "tool_timeout_sec": 900
+    }
+  }
+}

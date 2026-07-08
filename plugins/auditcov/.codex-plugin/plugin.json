@@ -1,0 +1,24 @@
+{
+  "name": "auditcov",
+  "version": "0.1.0",
+  "description": "AuditCov tracks objective source-code read coverage for Codex security audits.",
+  "author": {
+    "name": "AuditCov"
+  },
+  "license": "MIT",
+  "keywords": ["audit-coverage", "mcp", "security-audit", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AuditCov",
+    "shortDescription": "Track objective read coverage for code audits.",
+    "longDescription": "AuditCov adds a local MCP server and Codex skill for tracking which source-code lines were returned to the model during an audit. It groups coverage by project root and thread, and keeps coverage separate from security completeness.",
+    "developerName": "AuditCov",
+    "category": "Productivity",
+    "capabilities": ["MCP", "Skills", "Local"],
+    "defaultPrompt": [
+      "Use AuditCov to audit this repo until read coverage reaches 80%.",
+      "Use AuditCov to track objective read coverage for this module."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -51,8 +51,10 @@ http://127.0.0.1:8765
 
 The viewer reads the same SQLite database as the MCP server. It shows:
 
-- all initialized Codex thread projects
-- project-level objective read coverage
+- all initialized project roots
+- project-root objective read coverage aggregated across all initialized threads
+- per-thread objective read coverage based on each thread's frozen `target_paths`
+- selected-thread aggregate coverage for one or more chosen sessions
 - target directory and file coverage
 - per-file covered and uncovered source lines
 
@@ -79,7 +81,7 @@ $env:AUDITCOV_ROLLOUT_DIR = "D:/path/to/codex/jsonl"
 python -m auditcov_mcp.server
 ```
 
-When AuditCov sees common direct-read shell commands such as `cat`, `sed`, `Get-Content`, `rg`, or `grep` in rollout records for the same `thread_id` or `session_id`, it writes a stderr log line:
+When AuditCov sees common direct-read shell commands such as `cat`, `sed`, or `Get-Content` in rollout records for the same `thread_id` or `session_id`, it writes a stderr log line:
 
 ```text
 [AUDITCOV_BYPASS] thread_id=... kind=possible_direct_file_read source=... command="..."
@@ -109,8 +111,8 @@ Behavior:
 - only built-in source-code extensions are included.
 - symlinked files and directories are skipped.
 - generated/vendor-style directories such as `.git`, `node_modules`, `dist`, `build`, and `target` are skipped by fixed policy.
-- repeated initialization with the same frozen snapshot is idempotent.
-- repeated initialization with different inputs or changed file content returns an error.
+- each Codex thread can initialize AuditCov only once.
+- repeated initialization in the same thread returns an error and tells the user to start a new thread for a new audit scope.
 
 ### auditcov_read_file
 
@@ -164,4 +166,35 @@ Run tests:
 
 ```powershell
 python -m unittest discover -s tests
+```
+
+## Codex Plugin Package
+
+The repo contains a local Codex plugin package at:
+
+```text
+plugins/auditcov
+```
+
+It bundles:
+
+- `.codex-plugin/plugin.json`
+- `.mcp.json`
+- `auditcov_mcp/`
+- `skills/auditcov/`
+
+Validate the plugin:
+
+```powershell
+python C:\Users\Administrator\.codex\skills\.system\plugin-creator\scripts\validate_plugin.py plugins\auditcov
+```
+
+The plugin MCP server uses:
+
+```json
+{
+  "command": "python",
+  "args": ["-m", "auditcov_mcp.server"],
+  "cwd": "."
+}
 ```

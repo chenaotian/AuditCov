@@ -1,0 +1,14 @@
+[project]
+name = "auditcov"
+version = "0.1.0"
+description = "Codex-first objective read coverage tracker for AI code audits."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+auditcov-mcp = "auditcov_mcp.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

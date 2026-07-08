@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+.auditcov/
+.pytest_cache/

@@ -40,9 +40,9 @@ When no concrete threshold is requested, use coverage as a reference signal only
 
 ## Code Reading Rule
 
-After AuditCov is activated, all source-code reading for the audit must go through `auditcov_read_file`. Do not use shell commands or other tools to read source-code contents, including commands such as `cat`, `type`, `Get-Content`, `sed -n`, `head`, `tail`, `less`, or search commands that print matching code lines.
+After AuditCov is activated, use `auditcov_read_file` for file and line-range reads that provide source code for audit review or coverage. Do not use shell commands or other tools such as `cat`, `type`, `Get-Content`, `sed -n`, `head`, `tail`, or `less` to dump source files or line ranges as a substitute for `auditcov_read_file`.
 
-Shell commands may be used only for non-code discovery, such as listing directory names, finding file paths, checking file metadata, or searching for filenames. If a search would expose source-code snippets, use it only to identify candidate files and then read the relevant ranges with `auditcov_read_file`.
+Code search is allowed. Shell commands and search tools may print matching lines or small snippets to locate candidate files, functions, symbols, or patterns. Search output does not count as AuditCov coverage; before using a searched code region as audit evidence, read the relevant file or range with `auditcov_read_file`.
 
 ## MCP Workflow
 
@@ -57,7 +57,7 @@ Recommended sequence:
 
 1. Determine the repository root and target paths from the user request. Do not shrink the target denominator to improve coverage.
 2. Call `auditcov_init_project` once for the chosen scope when AuditCov is first activated.
-3. Use shell commands only for discovery that does not reveal source-code lines.
+3. Use shell commands for discovery and code search as needed. Search snippets do not count as coverage.
 4. Use `auditcov_read_file` for source code that should count as read coverage. If the result is truncated, continue from `next_start_line`.
 5. Use `auditcov_get_coverage` and `auditcov_get_file_detail` to choose remaining unread files or ranges.
 6. Report coverage as objective read coverage, not as proof that the audit is complete.

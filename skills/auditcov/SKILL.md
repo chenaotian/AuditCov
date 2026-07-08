@@ -1,53 +1,53 @@
 ---
 name: auditcov
-description: 仅当用户明确点名 AuditCov、该 skill、AuditCov MCP、审计覆盖率、客观读取覆盖率，或要求代码审计达到具体覆盖率阈值时使用。普通代码审计、安全审计、漏洞挖掘请求如果没有提到覆盖率或 AuditCov，不要使用。
+description: Use AuditCov only when the user explicitly names AuditCov, this skill, the AuditCov MCP, audit coverage, objective read coverage, or asks to audit until a specific code-audit coverage threshold is reached. Do not use for ordinary code review or security audit requests that do not mention coverage or AuditCov.
 ---
 
 # AuditCov
 
-AuditCov 用来记录客观读取覆盖率：也就是通过 AuditCov MCP 读取工具完整返回给模型的源码行。它不能证明漏洞审计已经完成，也不能证明模型已经理解了每一行返回的代码。
+AuditCov tracks objective read coverage: complete source-code lines returned to the model through the AuditCov MCP read tool. It does not prove that a vulnerability audit is complete, and it does not prove the model understood every returned line.
 
-## 触发规则
+## Activation Rule
 
 只有当用户点名使用该skill / mcp的时候才使用，否则不要使用。
 
-以下情况才算明确触发：
+Treat these as explicit activation:
 
-- 用户点名 `AuditCov`、该 skill，或者 AuditCov MCP。
-- 用户要求统计审计覆盖率、客观读取覆盖率，或者代码审计覆盖率。
-- 用户要求审计直到达到某个具体覆盖率阈值，例如 80%。
+- The user names `AuditCov`, this skill, or the AuditCov MCP.
+- The user asks for audit coverage, objective read coverage, or code-audit coverage tracking.
+- The user asks to audit until a concrete coverage threshold is reached, such as 80%.
 
-普通安全审计、代码审计、漏洞挖掘或仓库探索请求，如果用户没有明确要求使用 AuditCov 或审计覆盖率，不要使用 AuditCov。
+Do not use AuditCov for a normal security review, code audit, bug hunt, or repository exploration unless the user explicitly asks for AuditCov or audit coverage.
 
-## 覆盖率目标规则
+## Coverage Goal Rule
 
 如果用户明确要求审计覆盖率，如：审计代码直到覆盖80%/确保审计覆盖率达到80%这种话术，则需要使用goal设置一个目标，一直审计直到完成目标，如果用户没有明确要求一定要审计达到特定覆盖率，则不受影响，覆盖率仅供用户参考，不作为目标，审计节奏由你自由掌控
 
-当用户要求达到具体覆盖率阈值时：
+When a concrete coverage threshold is requested:
 
-1. 在开始审计前创建 goal，目标可以写成类似：`审计目标代码，直到 AuditCov 客观读取覆盖率至少达到 80%，并报告安全发现`。
-2. 按用户确认的审计范围初始化 AuditCov。
-3. 持续通过 `auditcov_read_file` 读取目标文件、分析返回的代码，并用 `auditcov_get_coverage` 检查覆盖率，直到达到用户要求的阈值。
-4. 只有在覆盖率阈值实际达到，或者遇到真实阻塞无法继续推进时，才能结束该 goal。
+1. Create a goal before starting the audit, with an objective such as `Audit target code until AuditCov objective read coverage is at least 80% and report security findings`.
+2. Initialize AuditCov for the user-approved audit scope.
+3. Continue reading target files through `auditcov_read_file`, analyzing returned code, and checking `auditcov_get_coverage` until the requested coverage threshold is met.
+4. Do not mark the goal complete until the threshold is actually reached, or until a real blocker prevents progress.
 
-如果用户没有要求具体阈值，只把覆盖率作为参考信号。不要把覆盖率变成隐含的完成门槛。
+When no concrete threshold is requested, use coverage as a reference signal only. Do not turn coverage into an implicit completion gate.
 
-## MCP 工作流
+## MCP Workflow
 
-只有通过 AuditCov MCP 工具读取到的内容，才能计入客观覆盖率：
+Use only the AuditCov MCP tools for reads that should count toward objective coverage:
 
-- `auditcov_init_project`：冻结当前线程的覆盖率分母。
-- `auditcov_read_file`：读取完整源码行，并记录客观读取覆盖率。
-- `auditcov_get_coverage`：查看项目、目录或文件覆盖率。
-- `auditcov_get_file_detail`：查看单个文件中已覆盖和未覆盖的行号范围。
+- `auditcov_init_project`: freeze the denominator for the current thread.
+- `auditcov_read_file`: read complete file lines and record objective read coverage.
+- `auditcov_get_coverage`: check project, directory, or file coverage.
+- `auditcov_get_file_detail`: inspect covered and uncovered line ranges for one file.
 
-推荐流程：
+Recommended sequence:
 
-1. 根据用户请求确定仓库根目录和目标路径。不要为了提高覆盖率而缩小目标分母。
-2. 对选定范围调用一次 `auditcov_init_project`。
-3. 仅把 shell 命令用于目录发现和搜索。通过 shell 读取的代码不计入 AuditCov 客观读取覆盖率。
-4. 对需要计入覆盖率的源码使用 `auditcov_read_file`。如果返回结果被截断，从 `next_start_line` 继续读取。
-5. 使用 `auditcov_get_coverage` 和 `auditcov_get_file_detail` 选择剩余未读文件或行号范围。
-6. 汇报覆盖率时称为客观读取覆盖率，不要把它说成审计完成的证明。
+1. Determine the repository root and target paths from the user request. Do not shrink the target denominator to improve coverage.
+2. Call `auditcov_init_project` once for the chosen scope.
+3. Use shell commands only for discovery and search. Shell reads do not count toward AuditCov objective read coverage.
+4. Use `auditcov_read_file` for source code that should count as read coverage. If the result is truncated, continue from `next_start_line`.
+5. Use `auditcov_get_coverage` and `auditcov_get_file_detail` to choose remaining unread files or ranges.
+6. Report coverage as objective read coverage, not as proof that the audit is complete.
 
-如果 AuditCov MCP 工具不可用，明确说明当前 Codex 环境没有配置 AuditCov。不要假装 shell 读取也能计入 AuditCov 覆盖率。
+If the AuditCov MCP tools are unavailable, say that AuditCov is not configured in this Codex environment. Do not pretend shell reads count as AuditCov coverage.

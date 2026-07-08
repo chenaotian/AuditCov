@@ -25,7 +25,7 @@ AuditCov 用来记录客观读取覆盖率：也就是通过 AuditCov MCP 读取
 
 ## 初始化规则
 
-当前请求首次在线程中触发 AuditCov 时，只调用一次 `auditcov_init_project`。不要为了刷新状态、重置覆盖率或改善分母而重复调用。如果当前线程已经初始化过 AuditCov，继续使用已有项目。只有当用户明确开始一个新的 AuditCov 审计范围时，才重新初始化。
+当前请求首次在线程中触发 AuditCov 时，只调用一次 `auditcov_init_project`。同一个 thread 不能初始化多次，即使用户要求重新初始化也不行。如果用户在初始化之后想开始新的 AuditCov 审计范围，告诉用户需要开启新 thread，并在新 thread 中初始化 AuditCov。
 
 初始化之后，不要为了更容易达到覆盖率而缩小或替换目标路径。
 
@@ -41,6 +41,12 @@ AuditCov 用来记录客观读取覆盖率：也就是通过 AuditCov MCP 读取
 4. 只有在覆盖率阈值实际达到，或者遇到真实阻塞无法继续推进时，才能结束该 goal。
 
 如果用户没有要求具体阈值，只把覆盖率作为参考信号。不要把覆盖率变成隐含的完成门槛。
+
+## Web 覆盖率语义
+
+Web 查看器按 `project_root` 聚合已经初始化过的工作。一个 project root 有一个总覆盖率，表示该 root 下面所有已初始化 `thread_id` 的汇总覆盖情况。每个单独的 `thread_id` 也有自己的覆盖率，它的分母只来自该 thread 调用 `auditcov_init_project` 时冻结的 `target_paths`，不是整个 project root。
+
+查看同一个 project root 下多个被选中的 thread 时，分母是这些被选中 thread 的冻结目标快照并集，分子是这些 thread 已覆盖行号范围的并集。汇报所选视图时，不要把未选中的 thread 算进去。
 
 ## 代码读取规则
 

@@ -1,7 +1,9 @@
 const state = {
   projects: [],
-  selectedThreadId: null,
+  selectedProjectRoot: null,
+  selectedThreadIds: new Set(),
   selectedFilePath: null,
+  rootDetail: null,
   project: null,
   settings: null,
 };
@@ -18,6 +20,7 @@ const els = {
   projectTitle: document.getElementById("projectTitle"),
   projectMeta: document.getElementById("projectMeta"),
   metricGrid: document.getElementById("metricGrid"),
+  threadSelector: document.getElementById("threadSelector"),
   treeView: document.getElementById("treeView"),
   filePath: document.getElementById("filePath"),
   fileStats: document.getElementById("fileStats"),
@@ -43,9 +46,11 @@ async function loadProjects() {
     return;
   }
 
-  const selectedExists = state.projects.some((project) => project.thread_id === state.selectedThreadId);
-  const nextThreadId = selectedExists ? state.selectedThreadId : state.projects[0].thread_id;
-  await loadProject(nextThreadId);
+  const selectedExists = state.projects.some(
+    (project) => project.project_root === state.selectedProjectRoot,
+  );
+  const nextRoot = selectedExists ? state.selectedProjectRoot : state.projects[0].project_root;
+  await loadProjectRoot(nextRoot);
 }
 
 async function loadSettings() {
@@ -74,21 +79,54 @@ async function moveWorkdir() {
   }
 }
 
-async function loadProject(threadId) {
-  state.selectedThreadId = threadId;
+async function loadProjectRoot(projectRoot) {
+  state.selectedProjectRoot = projectRoot;
   state.selectedFilePath = null;
-  state.project = await fetchJson(`/api/projects/${encodeURIComponent(threadId)}`);
+  state.rootDetail = await fetchJson(
+    `/api/projects/root?project_root=${encodeURIComponent(projectRoot)}`,
+  );
+
+  const available = new Set(state.rootDetail.threads.map((thread) => thread.thread_id));
+  const retained = [...state.selectedThreadIds].filter((threadId) => available.has(threadId));
+  state.selectedThreadIds = new Set(retained.length ? retained : [...available]);
+
+  renderProjectList();
+  await loadSelectedCoverage();
+}
+
+async function loadSelectedCoverage() {
+  state.selectedFilePath = null;
+  if (!state.selectedProjectRoot || state.selectedThreadIds.size === 0) {
+    state.project = null;
+    renderProject();
+    return;
+  }
+
+  const params = selectedThreadParams();
+  state.project = await fetchJson(`/api/projects/coverage?${params.toString()}`);
   renderProjectList();
   renderProject();
 }
 
 async function loadFile(path) {
+  if (!state.selectedProjectRoot || state.selectedThreadIds.size === 0) {
+    return;
+  }
   state.selectedFilePath = path;
-  const encodedThread = encodeURIComponent(state.selectedThreadId);
-  const encodedPath = encodeURIComponent(path);
-  const file = await fetchJson(`/api/projects/${encodedThread}/file?path=${encodedPath}`);
+  const params = selectedThreadParams();
+  params.set("path", path);
+  const file = await fetchJson(`/api/projects/file?${params.toString()}`);
   renderTree(state.project.tree);
   renderFile(file);
+}
+
+function selectedThreadParams() {
+  const params = new URLSearchParams();
+  params.set("project_root", state.selectedProjectRoot);
+  for (const threadId of state.selectedThreadIds) {
+    params.append("thread_id", threadId);
+  }
+  return params;
 }
 
 async function fetchJson(url) {
@@ -140,7 +178,7 @@ function renderProjectList() {
   if (!state.projects.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No projects have called auditcov_init_project.";
+    empty.textContent = "No project roots have called auditcov_init_project.";
     els.projectList.appendChild(empty);
     return;
   }
@@ -148,16 +186,21 @@ function renderProjectList() {
   for (const project of state.projects) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `project-item${project.thread_id === state.selectedThreadId ? " active" : ""}`;
-    button.addEventListener("click", () => loadProject(project.thread_id));
+    button.className = `project-item${project.project_root === state.selectedProjectRoot ? " active" : ""}`;
+    button.addEventListener("click", () => loadProjectRoot(project.project_root));
 
     const name = document.createElement("div");
     name.className = "project-name";
     name.textContent = project.project_label;
+    name.title = project.project_root;
 
     const thread = document.createElement("div");
     thread.className = "project-thread";
-    thread.textContent = shortId(project.thread_id);
+    thread.textContent = `${project.thread_count} thread${project.thread_count === 1 ? "" : "s"} | ${formatPercent(project.percent)}`;
+
+    const rootPath = document.createElement("div");
+    rootPath.className = "project-root";
+    rootPath.textContent = project.project_root;
 
     const bar = document.createElement("div");
     bar.className = "mini-bar";
@@ -166,7 +209,7 @@ function renderProjectList() {
     fill.style.width = `${clampPercent(project.percent)}%`;
     bar.appendChild(fill);
 
-    button.append(name, thread, bar);
+    button.append(name, thread, rootPath, bar);
     els.projectList.appendChild(button);
   }
 }
@@ -176,6 +219,8 @@ function renderEmpty() {
   els.projectTitle.textContent = "Audit coverage viewer";
   els.projectMeta.textContent = "";
   els.metricGrid.replaceChildren();
+  els.threadSelector.className = "thread-selector empty-state";
+  els.threadSelector.textContent = "Select a project root to choose sessions.";
   els.treeView.className = "tree-view empty-state";
   els.treeView.textContent = "No initialized projects found.";
   els.filePath.textContent = "Select a file from the target tree.";
@@ -185,25 +230,62 @@ function renderEmpty() {
 }
 
 function renderProject() {
-  const project = state.project;
-  els.projectKicker.textContent = shortId(project.thread_id);
-  els.projectTitle.textContent = project.project_label;
-  els.projectMeta.textContent = project.project_root;
-  renderMetrics(project);
-  renderTree(project.tree);
+  const detail = state.rootDetail;
+  if (!detail) {
+    renderEmpty();
+    return;
+  }
+
+  els.projectKicker.textContent = `${detail.thread_count} thread${detail.thread_count === 1 ? "" : "s"} under root`;
+  els.projectTitle.textContent = detail.project_label;
+  els.projectMeta.textContent = detail.project_root;
+  renderMetrics();
+  renderThreadSelector();
+
+  if (!state.project) {
+    els.treeView.className = "tree-view empty-state";
+    els.treeView.textContent = "Select at least one thread_id to view coverage.";
+    els.filePath.textContent = "Select a file from the target tree.";
+    els.fileStats.textContent = "";
+    els.codeView.className = "code-view empty-state";
+    els.codeView.textContent = "No selected session coverage.";
+    return;
+  }
+
+  renderTree(state.project.tree);
   els.filePath.textContent = "Select a file from the target tree.";
   els.fileStats.textContent = "";
   els.codeView.className = "code-view empty-state";
   els.codeView.textContent = "Covered lines will appear with a solid left rail.";
 }
 
-function renderMetrics(project) {
+function renderMetrics() {
   els.metricGrid.replaceChildren();
+  const detail = state.rootDetail;
+  const selected = state.project;
   const metrics = [
-    ["Read coverage", formatPercent(project.percent), `${project.covered_lines} / ${project.total_lines} lines`],
-    ["Covered files", `${project.covered_files}`, `${project.total_files} target files`],
-    ["Target paths", `${project.target_paths.length}`, project.target_paths.join(", ")],
-    ["Response cap", `${project.max_response_bytes} B`, "complete-line truncation"],
+    [
+      "Selected coverage",
+      selected ? formatPercent(selected.percent) : "0.00%",
+      selected
+        ? `${selected.covered_lines} / ${selected.total_lines} lines`
+        : "No selected threads",
+    ],
+    [
+      "Root total",
+      formatPercent(detail.percent),
+      `${detail.covered_lines} / ${detail.total_lines} lines across all threads`,
+    ],
+    [
+      "Selected threads",
+      `${state.selectedThreadIds.size}`,
+      `${detail.thread_count} available under this root`,
+    ],
+    [
+      "Target paths",
+      selected ? `${selected.target_paths.length}` : "0",
+      selected?.target_paths?.join(", ") || "Select sessions to inspect scope",
+    ],
   ];
 
   for (const [label, value, sub] of metrics) {
@@ -225,6 +307,86 @@ function renderMetrics(project) {
     node.append(labelNode, valueNode, subNode);
     els.metricGrid.appendChild(node);
   }
+}
+
+function renderThreadSelector() {
+  const detail = state.rootDetail;
+  els.threadSelector.className = "thread-selector";
+  els.threadSelector.replaceChildren();
+
+  const header = document.createElement("div");
+  header.className = "thread-selector-header";
+
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  title.textContent = "Sessions";
+
+  const actions = document.createElement("div");
+  actions.className = "thread-actions";
+
+  const allButton = document.createElement("button");
+  allButton.type = "button";
+  allButton.className = "small-button";
+  allButton.textContent = "All";
+  allButton.addEventListener("click", () => {
+    state.selectedThreadIds = new Set(detail.threads.map((thread) => thread.thread_id));
+    loadSelectedCoverage();
+  });
+
+  const noneButton = document.createElement("button");
+  noneButton.type = "button";
+  noneButton.className = "small-button";
+  noneButton.textContent = "None";
+  noneButton.addEventListener("click", () => {
+    state.selectedThreadIds = new Set();
+    loadSelectedCoverage();
+  });
+
+  actions.append(allButton, noneButton);
+  header.append(title, actions);
+  els.threadSelector.appendChild(header);
+
+  const list = document.createElement("div");
+  list.className = "thread-list";
+  for (const thread of detail.threads) {
+    const label = document.createElement("label");
+    label.className = `thread-row${state.selectedThreadIds.has(thread.thread_id) ? " selected" : ""}`;
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.selectedThreadIds.has(thread.thread_id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        state.selectedThreadIds.add(thread.thread_id);
+      } else {
+        state.selectedThreadIds.delete(thread.thread_id);
+      }
+      loadSelectedCoverage();
+    });
+
+    const main = document.createElement("div");
+    main.className = "thread-main";
+
+    const id = document.createElement("div");
+    id.className = "thread-id";
+    id.textContent = shortId(thread.thread_id);
+    id.title = thread.thread_id;
+
+    const targets = document.createElement("div");
+    targets.className = "thread-targets";
+    targets.textContent = thread.target_paths.join(", ");
+
+    main.append(id, targets);
+
+    const coverage = document.createElement("div");
+    coverage.className = "thread-coverage";
+    coverage.textContent = `${formatPercent(thread.percent)} | ${thread.covered_lines}/${thread.total_lines}`;
+
+    label.append(checkbox, main, coverage);
+    list.appendChild(label);
+  }
+
+  els.threadSelector.appendChild(list);
 }
 
 function renderTree(root) {

@@ -126,11 +126,35 @@ class AuditCovStore:
 
     def list_projects(self) -> dict[str, Any]:
         rows = self.conn.execute(
-            "SELECT * FROM tasks ORDER BY created_at DESC"
+            """
+            SELECT project_root, COUNT(*) AS thread_count,
+                   MIN(created_at) AS first_created_at,
+                   MAX(created_at) AS latest_created_at
+            FROM tasks
+            GROUP BY project_root
+            ORDER BY latest_created_at DESC
+            """
         ).fetchall()
+        projects = []
+        for row in rows:
+            thread_rows = self._tasks_for_project_root(str(row["project_root"]))
+            thread_ids = [thread["thread_id"] for thread in thread_rows]
+            coverage = self._aggregate_coverage_values(str(row["project_root"]), thread_ids)
+            projects.append(
+                {
+                    "project_root": row["project_root"],
+                    "project_label": Path(row["project_root"]).name or row["project_root"],
+                    "thread_count": int(row["thread_count"]),
+                    "thread_ids": thread_ids,
+                    "target_paths": self._target_paths_for_tasks(thread_rows),
+                    "created_at": row["first_created_at"],
+                    "updated_at": row["latest_created_at"],
+                    **coverage,
+                }
+            )
         return {
             "db_path": str(self.db_path),
-            "projects": [self._task_summary(row) for row in rows],
+            "projects": projects,
         }
 
     def get_project_tree(self, thread_id: str) -> dict[str, Any]:
@@ -149,6 +173,38 @@ class AuditCovStore:
             Path(task["project_root"]).name or str(task["project_root"]),
         )
         return {**summary, "tree": tree}
+
+    def get_project_root_threads(self, project_root: str) -> dict[str, Any]:
+        root = self._stored_project_root(project_root)
+        thread_rows = self._tasks_for_project_root(root)
+        thread_ids = [row["thread_id"] for row in thread_rows]
+        coverage = self._aggregate_coverage_values(root, thread_ids)
+        return {
+            "project_root": root,
+            "project_label": Path(root).name or root,
+            "thread_count": len(thread_rows),
+            "thread_ids": thread_ids,
+            "target_paths": self._target_paths_for_tasks(thread_rows),
+            "threads": [self._task_summary(row) for row in thread_rows],
+            **coverage,
+        }
+
+    def get_project_root_tree(self, project_root: str, thread_ids: list[str]) -> dict[str, Any]:
+        root = self._stored_project_root(project_root)
+        thread_rows = self._tasks_for_thread_ids(root, thread_ids)
+        selected_thread_ids = [row["thread_id"] for row in thread_rows]
+        coverage = self._aggregate_coverage_values(root, selected_thread_ids)
+        files = self._aggregate_file_values(root, selected_thread_ids, "project", None)
+        tree = build_tree(files, Path(root).name or root)
+        return {
+            "project_root": root,
+            "project_label": Path(root).name or root,
+            "selected_thread_ids": selected_thread_ids,
+            "selected_thread_count": len(selected_thread_ids),
+            "target_paths": self._target_paths_for_tasks(thread_rows),
+            **coverage,
+            "tree": tree,
+        }
 
     def get_file_view(self, thread_id: str, path: str) -> dict[str, Any]:
         context = TaskContext(thread_id=thread_id)
@@ -193,11 +249,73 @@ class AuditCovStore:
             "lines": lines,
         }
 
+    def get_project_root_file_view(
+        self, project_root: str, thread_ids: list[str], path: str
+    ) -> dict[str, Any]:
+        root = self._stored_project_root(project_root)
+        thread_rows = self._tasks_for_thread_ids(root, thread_ids)
+        selected_thread_ids = [row["thread_id"] for row in thread_rows]
+        rel_path = self._normalize_project_root_file_path(root, path)
+        files = self._aggregate_file_values(root, selected_thread_ids, "file", rel_path)
+        if not files:
+            raise AuditCovError(f"path is not part of the selected target snapshots: {path}")
+
+        file_info = files[0]
+        total_lines = int(file_info["total_lines"])
+        ranges = file_info["ranges"]
+        abs_path = Path(root) / Path(rel_path)
+        current_digest = hashlib.sha256()
+        current_line_count = 0
+        lines = []
+        range_index = 0
+
+        with abs_path.open("rb") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                current_digest.update(raw_line)
+                current_line_count += 1
+                while range_index < len(ranges) and line_number > ranges[range_index][1]:
+                    range_index += 1
+                covered = (
+                    range_index < len(ranges)
+                    and ranges[range_index][0] <= line_number <= ranges[range_index][1]
+                )
+                lines.append(
+                    {
+                        "number": line_number,
+                        "text": raw_line.decode("utf-8", errors="replace").rstrip("\r\n"),
+                        "covered": covered,
+                    }
+                )
+
+        current_sha256 = current_digest.hexdigest()
+        content_sha256s = sorted(file_info["content_sha256s"])
+        return {
+            "path": rel_path,
+            "thread_ids": selected_thread_ids,
+            "total_lines": total_lines,
+            "covered_lines": file_info["covered_lines"],
+            "percent": file_info["percent"],
+            "covered_ranges": format_ranges(ranges),
+            "uncovered_ranges": format_ranges(complement_ranges(ranges, total_lines)),
+            "content_sha256s": content_sha256s,
+            "current_sha256": current_sha256,
+            "content_changed": current_sha256 not in content_sha256s,
+            "current_line_count": current_line_count,
+            "lines": lines,
+        }
+
     def init_project(
         self, context: TaskContext, project_root: str, target_paths: list[str]
     ) -> dict[str, Any]:
         if not context.thread_id:
             raise AuditCovError("missing thread_id in MCP request metadata")
+
+        existing = self._get_task(context.thread_id)
+        if existing is not None:
+            raise AuditCovError(
+                "AuditCov is already initialized for this thread; "
+                "start a new thread to initialize a new audit scope"
+            )
 
         root = Path(project_root).expanduser().resolve()
         if not root.is_dir():
@@ -211,19 +329,6 @@ class AuditCovStore:
         snapshot_id = self._snapshot_id(root, normalized_targets, files)
         target_paths_json = json.dumps(normalized_targets, ensure_ascii=False, sort_keys=True)
         now = utc_now()
-
-        existing = self._get_task(context.thread_id)
-        if existing is not None:
-            if (
-                existing["project_root"] == str(root)
-                and existing["target_paths_json"] == target_paths_json
-                and existing["snapshot_id"] == snapshot_id
-            ):
-                return self._init_response(context.thread_id, root, normalized_targets, files, snapshot_id)
-            raise AuditCovError(
-                "this thread already has a different AuditCov project snapshot; "
-                "start a new thread or remove the existing database entry"
-            )
 
         with self.conn:
             self.conn.execute(
@@ -431,6 +536,67 @@ class AuditCovStore:
             "SELECT * FROM tasks WHERE thread_id = ?", (thread_id,)
         ).fetchone()
 
+    def _stored_project_root(self, project_root: str) -> str:
+        raw_root = str(project_root)
+        row = self.conn.execute(
+            "SELECT project_root FROM tasks WHERE project_root = ? LIMIT 1", (raw_root,)
+        ).fetchone()
+        if row is not None:
+            return str(row["project_root"])
+
+        resolved_root = str(Path(project_root).expanduser().resolve())
+        row = self.conn.execute(
+            "SELECT project_root FROM tasks WHERE project_root = ? LIMIT 1", (resolved_root,)
+        ).fetchone()
+        if row is not None:
+            return str(row["project_root"])
+        raise AuditCovError(f"project_root is not initialized: {project_root}")
+
+    def _tasks_for_project_root(self, project_root: str) -> list[sqlite3.Row]:
+        rows = list(
+            self.conn.execute(
+                "SELECT * FROM tasks WHERE project_root = ? ORDER BY created_at DESC",
+                (project_root,),
+            )
+        )
+        if not rows:
+            raise AuditCovError(f"project_root is not initialized: {project_root}")
+        return rows
+
+    def _tasks_for_thread_ids(
+        self, project_root: str, thread_ids: list[str]
+    ) -> list[sqlite3.Row]:
+        selected = []
+        seen = set()
+        for thread_id in thread_ids:
+            if not isinstance(thread_id, str) or not thread_id:
+                raise AuditCovError("thread_id must be a non-empty string")
+            if thread_id in seen:
+                continue
+            seen.add(thread_id)
+            selected.append(thread_id)
+
+        if not selected:
+            raise AuditCovError("at least one thread_id must be selected")
+
+        placeholders = ", ".join("?" for _ in selected)
+        rows = list(
+            self.conn.execute(
+                f"""
+                SELECT * FROM tasks
+                WHERE project_root = ? AND thread_id IN ({placeholders})
+                """,
+                [project_root, *selected],
+            )
+        )
+        by_thread_id = {row["thread_id"]: row for row in rows}
+        missing = [thread_id for thread_id in selected if thread_id not in by_thread_id]
+        if missing:
+            raise AuditCovError(
+                "thread_id is not initialized under this project_root: " + ", ".join(missing)
+            )
+        return [by_thread_id[thread_id] for thread_id in selected]
+
     def _require_task(self, thread_id: str) -> sqlite3.Row:
         if not thread_id:
             raise AuditCovError("missing thread_id in MCP request metadata")
@@ -458,6 +624,12 @@ class AuditCovStore:
             **coverage,
         }
 
+    def _target_paths_for_tasks(self, tasks: list[sqlite3.Row]) -> list[str]:
+        target_paths = set()
+        for task in tasks:
+            target_paths.update(json.loads(task["target_paths_json"]))
+        return sorted(target_paths)
+
     def _file_coverage_values(self, thread_id: str, path: str) -> dict[str, Any]:
         file_row = self._get_file(thread_id, path)
         if file_row is None:
@@ -472,6 +644,99 @@ class AuditCovStore:
             "covered_files": 1 if covered_lines else 0,
             "total_files": 1,
         }
+
+    def _aggregate_coverage_values(
+        self, project_root: str, thread_ids: list[str], path: str | None = None
+    ) -> dict[str, Any]:
+        scope_type, normalized_path = self._resolve_aggregate_scope(project_root, thread_ids, path)
+        files = self._aggregate_file_values(
+            project_root, thread_ids, scope_type, normalized_path
+        )
+        total_lines = sum(int(item["total_lines"]) for item in files)
+        covered_lines = sum(int(item["covered_lines"]) for item in files)
+        covered_files = sum(1 for item in files if int(item["covered_lines"]) > 0)
+        return {
+            "scope_type": scope_type,
+            "path": normalized_path,
+            "covered_lines": covered_lines,
+            "total_lines": total_lines,
+            "percent": percent(covered_lines, total_lines),
+            "covered_files": covered_files,
+            "total_files": len(files),
+        }
+
+    def _aggregate_file_values(
+        self,
+        project_root: str,
+        thread_ids: list[str],
+        scope_type: str,
+        path: str | None,
+    ) -> list[dict[str, Any]]:
+        if not thread_ids:
+            raise AuditCovError("at least one thread_id must be selected")
+
+        placeholders = ", ".join("?" for _ in thread_ids)
+        where = [
+            "t.project_root = ?",
+            f"f.thread_id IN ({placeholders})",
+        ]
+        params: list[Any] = [project_root, *thread_ids]
+        if scope_type == "file":
+            where.append("f.path = ?")
+            params.append(path or "")
+        elif scope_type == "directory":
+            prefix = (path or "").rstrip("/")
+            where.append("(f.path = ? OR f.path LIKE ?)")
+            params.extend([prefix, f"{prefix}/%"])
+
+        rows = self.conn.execute(
+            f"""
+            SELECT f.thread_id, f.path, f.line_count, f.content_sha256
+            FROM files f
+            JOIN tasks t ON t.thread_id = f.thread_id
+            WHERE {" AND ".join(where)}
+            ORDER BY f.path, f.thread_id
+            """,
+            params,
+        )
+
+        by_path: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry = by_path.setdefault(
+                row["path"],
+                {
+                    "path": row["path"],
+                    "line_count": 0,
+                    "content_sha256s": set(),
+                    "thread_ids": [],
+                    "raw_ranges": [],
+                },
+            )
+            entry["line_count"] = max(entry["line_count"], int(row["line_count"]))
+            entry["content_sha256s"].add(row["content_sha256"])
+            entry["thread_ids"].append(row["thread_id"])
+            entry["raw_ranges"].extend(self._covered_ranges(row["thread_id"], row["path"]))
+
+        files = []
+        for entry in by_path.values():
+            total_lines = int(entry["line_count"])
+            ranges = clip_ranges(entry["raw_ranges"], total_lines)
+            covered_lines = sum(end - start + 1 for start, end in ranges)
+            files.append(
+                {
+                    "path": entry["path"],
+                    "line_count": total_lines,
+                    "total_lines": total_lines,
+                    "covered_lines": covered_lines,
+                    "percent": percent(covered_lines, total_lines),
+                    "covered_files": 1 if covered_lines else 0,
+                    "total_files": 1,
+                    "thread_ids": sorted(set(entry["thread_ids"])),
+                    "content_sha256s": entry["content_sha256s"],
+                    "ranges": ranges,
+                }
+            )
+        return sorted(files, key=lambda item: item["path"])
 
     def _normalize_target_paths(self, root: Path, target_paths: list[str]) -> list[str]:
         normalized = set()
@@ -570,6 +835,49 @@ class AuditCovStore:
         root = Path(task["project_root"])
         resolved = self._resolve_under_root(root, raw_path)
         return resolved.relative_to(root).as_posix()
+
+    def _normalize_project_root_file_path(self, project_root: str, raw_path: str) -> str:
+        root = Path(project_root)
+        resolved = self._resolve_under_root(root, raw_path)
+        return resolved.relative_to(root).as_posix()
+
+    def _resolve_aggregate_scope(
+        self, project_root: str, thread_ids: list[str], raw_path: str | None
+    ) -> tuple[str, str | None]:
+        if raw_path is None or raw_path == "":
+            return "project", None
+
+        rel_path = self._normalize_project_root_file_path(project_root, raw_path)
+        placeholders = ", ".join("?" for _ in thread_ids)
+        exact_file = self.conn.execute(
+            f"""
+            SELECT 1
+            FROM files f
+            JOIN tasks t ON t.thread_id = f.thread_id
+            WHERE t.project_root = ? AND f.thread_id IN ({placeholders}) AND f.path = ?
+            LIMIT 1
+            """,
+            [project_root, *thread_ids, rel_path],
+        ).fetchone()
+        if exact_file is not None:
+            return "file", rel_path
+
+        directory_prefix = rel_path.rstrip("/")
+        has_children = self.conn.execute(
+            f"""
+            SELECT 1
+            FROM files f
+            JOIN tasks t ON t.thread_id = f.thread_id
+            WHERE t.project_root = ?
+              AND f.thread_id IN ({placeholders})
+              AND (f.path = ? OR f.path LIKE ?)
+            LIMIT 1
+            """,
+            [project_root, *thread_ids, directory_prefix, f"{directory_prefix}/%"],
+        ).fetchone()
+        if has_children is None:
+            raise AuditCovError(f"path is not part of the selected target snapshots: {raw_path}")
+        return "directory", directory_prefix
 
     def _resolve_scope(
         self, task: sqlite3.Row, raw_path: str | None
@@ -742,6 +1050,17 @@ def complement_ranges(ranges: list[tuple[int, int]], total_lines: int) -> list[t
     if next_line <= total_lines:
         uncovered.append((next_line, total_lines))
     return uncovered
+
+
+def clip_ranges(ranges: list[tuple[int, int]], total_lines: int) -> list[tuple[int, int]]:
+    if total_lines <= 0:
+        return []
+    clipped = []
+    for start, end in ranges:
+        if end < 1 or start > total_lines:
+            continue
+        clipped.append((max(1, start), min(total_lines, end)))
+    return merge_ranges(clipped)
 
 
 def format_ranges(ranges: list[tuple[int, int]]) -> list[str]:

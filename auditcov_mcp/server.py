@@ -107,7 +107,8 @@ def tool_definitions() -> list[JSON]:
             "title": "Initialize AuditCov Project",
             "description": (
                 "Freeze the source-code coverage denominator for the current Codex thread. "
-                "Uses params._meta.x-codex-turn-metadata.thread_id as the task id."
+                "Uses params._meta.x-codex-turn-metadata.thread_id as the task id. "
+                "Each thread can initialize AuditCov only once; use a new thread for a new audit scope."
             ),
             "inputSchema": {
                 "type": "object",

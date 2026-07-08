@@ -46,6 +46,42 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/projects":
                 self._with_store(lambda store: store.list_projects())
                 return
+            if parsed.path == "/api/projects/root":
+                params = parse_qs(parsed.query)
+                project_root = params.get("project_root", [None])[0]
+                if not project_root:
+                    self._send_json({"error": "missing project_root"}, status=400)
+                    return
+                self._with_store(lambda store: store.get_project_root_threads(project_root))
+                return
+            if parsed.path == "/api/projects/coverage":
+                params = parse_qs(parsed.query)
+                project_root = params.get("project_root", [None])[0]
+                thread_ids = params.get("thread_id", [])
+                if not project_root:
+                    self._send_json({"error": "missing project_root"}, status=400)
+                    return
+                self._with_store(
+                    lambda store: store.get_project_root_tree(project_root, thread_ids)
+                )
+                return
+            if parsed.path == "/api/projects/file":
+                params = parse_qs(parsed.query)
+                project_root = params.get("project_root", [None])[0]
+                thread_ids = params.get("thread_id", [])
+                file_path = params.get("path", [None])[0]
+                if not project_root:
+                    self._send_json({"error": "missing project_root"}, status=400)
+                    return
+                if not file_path:
+                    self._send_json({"error": "missing file path"}, status=400)
+                    return
+                self._with_store(
+                    lambda store: store.get_project_root_file_view(
+                        project_root, thread_ids, file_path
+                    )
+                )
+                return
             if parsed.path.startswith("/api/projects/"):
                 self._handle_project_api(parsed.path, parsed.query)
                 return

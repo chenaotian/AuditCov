@@ -21,7 +21,7 @@ Do not use AuditCov for a normal security review, code audit, bug hunt, or repos
 
 ## Initialization Rule
 
-Call `auditcov_init_project` exactly once when the current request first activates AuditCov for the thread. Do not call it repeatedly to refresh state, reset coverage, or improve the denominator. If AuditCov is already initialized for the current thread, continue using the existing project. Reinitialize only when the user explicitly starts a new AuditCov audit scope.
+Call `auditcov_init_project` exactly once when the current request first activates AuditCov for the thread. A thread cannot be initialized more than once, even if the user asks to reinitialize it. If the user wants a new AuditCov audit scope after initialization, tell them to start a new thread and initialize AuditCov there.
 
 After initialization, do not shrink or replace the target paths to make coverage easier to reach.
 
@@ -37,6 +37,12 @@ When a concrete coverage threshold is requested:
 4. Do not mark the goal complete until the threshold is actually reached, or until a real blocker prevents progress.
 
 When no concrete threshold is requested, use coverage as a reference signal only. Do not turn coverage into an implicit completion gate.
+
+## Web Coverage Semantics
+
+The web viewer groups initialized work by `project_root`. A project root has an aggregate coverage value that combines all initialized `thread_id` values under that root. Each individual `thread_id` also has its own coverage value, whose denominator is only the `target_paths` frozen when that thread called `auditcov_init_project`, not the full project root.
+
+When viewing multiple selected threads under one project root, treat the denominator as the union of those selected threads' frozen target snapshots and the numerator as the union of their covered line ranges. Do not use unselected threads when reporting the selected view.
 
 ## Code Reading Rule
 

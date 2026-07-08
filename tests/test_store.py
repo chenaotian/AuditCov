@@ -33,12 +33,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(result["total_lines"], 2)
         self.assertIn(".c", result["included_extensions"])
 
-    def test_reinit_same_snapshot_is_idempotent(self) -> None:
+    def test_reinit_same_thread_errors(self) -> None:
         self.write("src/a.py", "print('hi')\n")
-        first = self.store.init_project(self.context, str(self.root), ["src"])
-        second = self.store.init_project(self.context, str(self.root), ["src"])
+        self.store.init_project(self.context, str(self.root), ["src"])
 
-        self.assertEqual(first["snapshot_id"], second["snapshot_id"])
+        with self.assertRaisesRegex(AuditCovError, "already initialized"):
+            self.store.init_project(self.context, str(self.root), ["src"])
+
+        with self.assertRaisesRegex(AuditCovError, "start a new thread"):
+            self.store.init_project(self.context, str(self.root / "missing"), ["nope"])
 
     def test_reinit_changed_snapshot_errors(self) -> None:
         self.write("src/a.py", "print('hi')\n")
@@ -80,6 +83,39 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(tree["total_lines"], 4)
         self.assertEqual(tree["children"][0]["name"], "src")
         self.assertEqual(tree["children"][0]["percent"], 75.0)
+
+    def test_project_root_aggregates_selected_threads(self) -> None:
+        self.write("src/a.py", "one\ntwo\nthree\n")
+        self.write("lib/b.py", "four\nfive\n")
+        thread_2 = TaskContext(thread_id="thread-2", turn_id="turn-2")
+
+        self.store.init_project(self.context, str(self.root), ["src"])
+        self.store.init_project(thread_2, str(self.root), ["src", "lib"])
+        self.store.read_file(self.context, "src/a.py", 1, 1)
+        self.store.read_file(thread_2, "src/a.py", 2, 3)
+        self.store.read_file(thread_2, "lib/b.py", 1, 1)
+
+        projects = self.store.list_projects()["projects"]
+        root_detail = self.store.get_project_root_threads(str(self.root))
+        selected_one = self.store.get_project_root_tree(str(self.root), ["thread-1"])
+        selected_both = self.store.get_project_root_tree(
+            str(self.root), ["thread-1", "thread-2"]
+        )
+        file_view = self.store.get_project_root_file_view(
+            str(self.root), ["thread-1", "thread-2"], "src/a.py"
+        )
+
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["thread_count"], 2)
+        self.assertEqual(projects[0]["covered_lines"], 4)
+        self.assertEqual(projects[0]["total_lines"], 5)
+        self.assertEqual(projects[0]["percent"], 80.0)
+        self.assertEqual(len(root_detail["threads"]), 2)
+        self.assertEqual(selected_one["covered_lines"], 1)
+        self.assertEqual(selected_one["total_lines"], 3)
+        self.assertEqual(selected_both["covered_lines"], 4)
+        self.assertEqual(selected_both["total_lines"], 5)
+        self.assertEqual(file_view["covered_ranges"], ["1-3"])
 
     def test_get_file_view_marks_lines(self) -> None:
         self.write("src/a.py", "one\ntwo\nthree\n")

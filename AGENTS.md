@@ -2,9 +2,11 @@
 
 This repository is for the AI Audit Coverage / AuditCov project.
 
-Primary design document:
+Current baseline:
 
-- `ai_audit_coverage_codex_v1_design.md`
+- Keep the first version small and runnable.
+- Add design detail only when it directly guides the next implementation step.
+- Do not recreate the deleted long-form v1 design unless the user asks for it.
 
 ## Working Rules
 
@@ -17,7 +19,7 @@ Primary design document:
 
 ## Implementation Direction
 
-- Follow the Codex v1 design document unless the user updates the design.
+- Build toward a minimal Codex-first AuditCov prototype.
 - Prefer conservative, auditable behavior over optimistic coverage claims.
 - Treat objective read coverage, snippet exposure, and file discovery as separate concepts.
 - Do not let model-controlled inputs lower project coverage gates or shrink the target denominator.

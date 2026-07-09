@@ -1,3 +1,5 @@
+const STORAGE_KEY = "auditcov.webViewerState.v1";
+
 const state = {
   projects: [],
   selectedProjectRoot: null,
@@ -27,6 +29,8 @@ const els = {
   fileStats: document.getElementById("fileStats"),
   codeView: document.getElementById("codeView"),
 };
+
+restoreViewState();
 
 els.refreshButton.addEventListener("click", () => loadProjects());
 els.workdirForm.addEventListener("submit", (event) => {
@@ -81,9 +85,12 @@ async function moveWorkdir() {
 }
 
 async function loadProjectRoot(projectRoot) {
+  const preserveView = projectRoot === state.selectedProjectRoot;
   state.selectedProjectRoot = projectRoot;
-  state.selectedFilePath = null;
-  state.expandedTreePaths = new Set();
+  if (!preserveView) {
+    state.selectedFilePath = null;
+    state.expandedTreePaths = new Set();
+  }
   state.rootDetail = await fetchJson(
     `/api/projects/root?project_root=${encodeURIComponent(projectRoot)}`,
   );
@@ -97,11 +104,12 @@ async function loadProjectRoot(projectRoot) {
 }
 
 async function loadSelectedCoverage() {
-  state.selectedFilePath = null;
-  state.expandedTreePaths = new Set();
+  const fileToRestore = state.selectedFilePath;
   if (!state.selectedProjectRoot || state.selectedThreadIds.size === 0) {
     state.project = null;
+    state.selectedFilePath = null;
     renderProject();
+    saveViewState();
     return;
   }
 
@@ -109,18 +117,34 @@ async function loadSelectedCoverage() {
   state.project = await fetchJson(`/api/projects/coverage?${params.toString()}`);
   renderProjectList();
   renderProject();
+  saveViewState();
+  if (fileToRestore) {
+    await restoreFileSelection(fileToRestore);
+  }
 }
 
 async function loadFile(path) {
   if (!state.selectedProjectRoot || state.selectedThreadIds.size === 0) {
     return;
   }
-  state.selectedFilePath = path;
   const params = selectedThreadParams();
   params.set("path", path);
   const file = await fetchJson(`/api/projects/file?${params.toString()}`);
+  state.selectedFilePath = path;
+  expandParentsForPath(path);
   renderTree(state.project.tree);
   renderFile(file);
+  saveViewState();
+}
+
+async function restoreFileSelection(path) {
+  try {
+    await loadFile(path);
+  } catch (_error) {
+    state.selectedFilePath = null;
+    renderProject();
+    saveViewState();
+  }
 }
 
 function selectedThreadParams() {
@@ -448,6 +472,7 @@ function renderTreeNode(node, depth) {
       state.expandedTreePaths.add(nodeKey);
     }
     renderTree(state.project.tree);
+    saveViewState();
   });
   wrapper.appendChild(children);
   return wrapper;
@@ -503,4 +528,60 @@ function formatPercent(value) {
 function clampPercent(value) {
   const number = Number(value || 0);
   return Math.max(0, Math.min(100, number));
+}
+
+function expandParentsForPath(path) {
+  if (!path) {
+    return;
+  }
+  state.expandedTreePaths.add("");
+  const parts = path.split("/");
+  for (let index = 1; index < parts.length; index += 1) {
+    state.expandedTreePaths.add(parts.slice(0, index).join("/"));
+  }
+}
+
+function restoreViewState() {
+  let parsed;
+  try {
+    parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+  } catch (_error) {
+    return;
+  }
+
+  if (typeof parsed.selectedProjectRoot === "string") {
+    state.selectedProjectRoot = parsed.selectedProjectRoot;
+  }
+  if (typeof parsed.selectedFilePath === "string") {
+    state.selectedFilePath = parsed.selectedFilePath;
+  }
+  if (Array.isArray(parsed.selectedThreadIds)) {
+    state.selectedThreadIds = new Set(parsed.selectedThreadIds.filter(isNonEmptyString));
+  }
+  if (Array.isArray(parsed.expandedTreePaths)) {
+    state.expandedTreePaths = new Set(parsed.expandedTreePaths.filter(isString));
+  }
+  expandParentsForPath(state.selectedFilePath);
+}
+
+function saveViewState() {
+  const payload = {
+    selectedProjectRoot: state.selectedProjectRoot,
+    selectedThreadIds: [...state.selectedThreadIds],
+    selectedFilePath: state.selectedFilePath,
+    expandedTreePaths: [...state.expandedTreePaths],
+  };
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch (_error) {
+    return;
+  }
+}
+
+function isString(value) {
+  return typeof value === "string";
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
 }

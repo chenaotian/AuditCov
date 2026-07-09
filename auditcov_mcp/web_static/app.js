@@ -6,6 +6,7 @@ const state = {
   rootDetail: null,
   project: null,
   settings: null,
+  expandedTreePaths: new Set(),
 };
 
 const els = {
@@ -82,6 +83,7 @@ async function moveWorkdir() {
 async function loadProjectRoot(projectRoot) {
   state.selectedProjectRoot = projectRoot;
   state.selectedFilePath = null;
+  state.expandedTreePaths = new Set();
   state.rootDetail = await fetchJson(
     `/api/projects/root?project_root=${encodeURIComponent(projectRoot)}`,
   );
@@ -96,6 +98,7 @@ async function loadProjectRoot(projectRoot) {
 
 async function loadSelectedCoverage() {
   state.selectedFilePath = null;
+  state.expandedTreePaths = new Set();
   if (!state.selectedProjectRoot || state.selectedThreadIds.size === 0) {
     state.project = null;
     renderProject();
@@ -398,12 +401,22 @@ function renderTree(root) {
 function renderTreeNode(node, depth) {
   const wrapper = document.createElement("div");
   const row = document.createElement("button");
+  const nodeKey = node.path || "";
+  const isDirectory = node.type !== "file";
+  const isExpanded = isDirectory && state.expandedTreePaths.has(nodeKey);
   row.type = "button";
   row.className = `tree-row${node.path === state.selectedFilePath ? " active" : ""}`;
+  if (isDirectory) {
+    row.setAttribute("aria-expanded", String(isExpanded));
+  }
+
+  const marker = document.createElement("div");
+  marker.className = "tree-marker";
+  marker.textContent = isDirectory ? (isExpanded ? "-" : "+") : "";
 
   const kind = document.createElement("div");
   kind.className = "tree-kind";
-  kind.textContent = node.type === "file" ? "FILE" : "DIR";
+  kind.textContent = isDirectory ? "DIR" : "FILE";
 
   const name = document.createElement("div");
   name.className = "tree-name";
@@ -414,22 +427,27 @@ function renderTreeNode(node, depth) {
   pct.className = "tree-percent";
   pct.textContent = formatPercent(node.percent);
 
-  row.append(kind, name, pct);
+  row.append(marker, kind, name, pct);
   wrapper.appendChild(row);
 
-  if (node.type === "file") {
+  if (!isDirectory) {
     row.addEventListener("click", () => loadFile(node.path));
     return wrapper;
   }
 
   const children = document.createElement("div");
-  children.className = "tree-children";
+  children.className = `tree-children${isExpanded ? "" : " collapsed"}`;
   for (const child of node.children || []) {
     children.appendChild(renderTreeNode(child, depth + 1));
   }
 
   row.addEventListener("click", () => {
-    children.classList.toggle("collapsed");
+    if (state.expandedTreePaths.has(nodeKey)) {
+      state.expandedTreePaths.delete(nodeKey);
+    } else {
+      state.expandedTreePaths.add(nodeKey);
+    }
+    renderTree(state.project.tree);
   });
   wrapper.appendChild(children);
   return wrapper;

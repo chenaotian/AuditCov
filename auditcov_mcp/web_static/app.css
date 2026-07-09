@@ -238,7 +238,7 @@ button {
 
 .workspace {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   gap: 14px;
   padding: 22px;
@@ -277,47 +277,40 @@ h1 {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .metric {
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
-  padding: 12px;
-  box-shadow: var(--shadow);
+  border-bottom: 1px solid var(--line);
+  padding: 4px 0 8px;
 }
 
 .metric-label {
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
 }
 
 .metric-value {
-  margin-top: 6px;
-  font-size: 24px;
+  margin-top: 4px;
+  font-size: 20px;
   font-weight: 800;
 }
 
 .metric-sub {
-  margin-top: 5px;
+  margin-top: 3px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
 .thread-selector {
   display: grid;
-  gap: 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(255, 253, 247, 0.94);
-  box-shadow: var(--shadow);
-  padding: 12px;
+  gap: 8px;
+  padding-top: 2px;
 }
 
 .thread-selector-header {
@@ -350,22 +343,22 @@ h1 {
 .thread-list {
   display: grid;
   gap: 6px;
-  max-height: 190px;
+  max-height: 118px;
   overflow: auto;
   padding-right: 4px;
 }
 
 .thread-row {
   display: grid;
-  min-height: 44px;
-  grid-template-columns: 22px minmax(0, 1fr) minmax(112px, auto);
+  min-height: 36px;
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel);
   cursor: pointer;
-  padding: 7px 9px;
+  padding: 6px 8px;
 }
 
 .thread-row:hover,
@@ -404,10 +397,11 @@ h1 {
 }
 
 .thread-coverage {
+  grid-column: 2;
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 12px;
-  text-align: right;
+  font-size: 11px;
+  text-align: left;
   white-space: nowrap;
 }
 
@@ -416,6 +410,25 @@ h1 {
   grid-template-columns: minmax(280px, 36%) minmax(0, 1fr);
   min-height: 0;
   gap: 14px;
+}
+
+.left-column {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+}
+
+.coverage-card {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 253, 247, 0.94);
+  box-shadow: var(--shadow);
+  padding: 12px;
 }
 
 .tree-panel,
@@ -458,9 +471,9 @@ h1 {
   display: grid;
   width: 100%;
   min-height: 32px;
-  grid-template-columns: 44px minmax(0, 1fr) 64px;
+  grid-template-columns: 16px 44px minmax(0, 1fr) 64px;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -473,6 +486,14 @@ h1 {
 .tree-row:hover,
 .tree-row.active {
   background: var(--accent-soft);
+}
+
+.tree-marker {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .tree-kind {
@@ -614,15 +635,6 @@ h1 {
   .metric-grid,
   .work-area {
     grid-template-columns: 1fr;
-  }
-
-  .thread-row {
-    grid-template-columns: 22px minmax(0, 1fr);
-  }
-
-  .thread-coverage {
-    grid-column: 2;
-    text-align: left;
   }
 
   .tree-panel {

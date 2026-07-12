@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -55,8 +56,13 @@ def source_paths() -> dict[str, Path]:
 def managed_handler(claude_hook: Path, log_path: Path) -> dict[str, Any]:
     return {
         "type": "command",
-        "command": "python3",
-        "args": [str(claude_hook), "--log", str(log_path)],
+        # Claude Code 2.1.138 accepts the args field in settings but launches only
+        # the bare executable. Keep the complete invocation in shell form so the
+        # recorder also works on clients that do not implement exec-form args.
+        "command": (
+            f"python3 {shlex.quote(str(claude_hook))} "
+            f"--log {shlex.quote(str(log_path))}"
+        ),
         "timeout": 10,
         "statusMessage": STATUS_MESSAGE,
     }
@@ -65,10 +71,27 @@ def managed_handler(claude_hook: Path, log_path: Path) -> dict[str, Any]:
 def is_managed_handler(value: Any) -> bool:
     if not isinstance(value, dict) or value.get("statusMessage") != STATUS_MESSAGE:
         return False
+
+    # Recognize the old exec-form configuration so reinstall and uninstall can
+    # replace it without disturbing unrelated user hooks.
     args = value.get("args")
-    if not isinstance(args, list) or not args or not isinstance(args[0], str):
+    if isinstance(args, list) and args and isinstance(args[0], str):
+        script_path = Path(args[0])
+        return (
+            script_path.name == "claude_read_hook.py"
+            and script_path.parent.name == "auditcov-read-hook-probe"
+        )
+
+    command = value.get("command")
+    if not isinstance(command, str):
         return False
-    script_path = Path(args[0])
+    try:
+        command_parts = shlex.split(command)
+    except ValueError:
+        return False
+    if len(command_parts) < 2:
+        return False
+    script_path = Path(command_parts[1])
     return (
         script_path.name == "claude_read_hook.py"
         and script_path.parent.name == "auditcov-read-hook-probe"

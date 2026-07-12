@@ -6,11 +6,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from scripts.install_read_hook_probes_wsl import (
     STATUS_MESSAGE,
     add_managed_handler,
+    managed_handler,
     remove_managed_handlers,
 )
 
@@ -105,6 +106,19 @@ class ReadHookProbeTests(unittest.TestCase):
         self.assertEqual(
             settings["hooks"]["PreToolUse"],
             [{"matcher": "Bash", "hooks": [existing_handler]}],
+        )
+
+    def test_installer_uses_shell_form_for_claude_compatibility(self) -> None:
+        handler = managed_handler(
+            PurePosixPath("/home/test/path with space/claude_read_hook.py"),
+            PurePosixPath("/home/test/state with space/events.jsonl"),
+        )
+
+        self.assertNotIn("args", handler)
+        self.assertEqual(
+            handler["command"],
+            "python3 '/home/test/path with space/claude_read_hook.py' "
+            "--log '/home/test/state with space/events.jsonl'",
         )
 
     def test_opencode_plugin_records_session_call_and_args(self) -> None:

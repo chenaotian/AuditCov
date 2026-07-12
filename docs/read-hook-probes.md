@@ -18,6 +18,8 @@ python3 scripts/install_read_hook_probes_wsl.py status
 
 The installer adds one managed `PreToolUse(Read)` handler to `~/.claude/settings.json`, copies its Python recorder under `~/.local/share/auditcov-read-hook-probe/`, and installs one OpenCode TS plugin under `~/.config/opencode/plugins/`. Existing unrelated Claude hooks and OpenCode configuration are preserved.
 
+The Claude handler stores the complete Python invocation in the `command` field. This shell-form configuration is intentional: Claude Code 2.1.138 can display an `args`-based handler in `/hooks` while launching only the bare `python3` executable.
+
 Restart Claude Code and OpenCode after installation.
 
 ## Prepare a test path

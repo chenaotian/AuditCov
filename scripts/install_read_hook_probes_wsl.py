@@ -14,6 +14,7 @@ from typing import Any
 
 STATUS_MESSAGE = "Recording Read parameters for the AuditCov probe"
 OPENCODE_MARKER = "AuditCov Read hook probe. This marker is used by the installer"
+CLAUDE_HOOK_EVENTS = ("PreToolUse", "PostToolUse")
 
 
 def data_home() -> Path:
@@ -104,30 +105,33 @@ def remove_managed_handlers(settings: dict[str, Any]) -> int:
         return 0
     if not isinstance(hooks, dict):
         raise RuntimeError("Claude settings 'hooks' must be an object")
-    groups = hooks.get("PreToolUse")
-    if groups is None:
-        return 0
-    if not isinstance(groups, list):
-        raise RuntimeError("Claude settings hooks.PreToolUse must be an array")
-
     removed = 0
-    retained_groups: list[Any] = []
-    for group in groups:
-        if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
-            retained_groups.append(group)
+    for event_name in CLAUDE_HOOK_EVENTS:
+        groups = hooks.get(event_name)
+        if groups is None:
             continue
-        handlers = group["hooks"]
-        retained_handlers = [handler for handler in handlers if not is_managed_handler(handler)]
-        removed += len(handlers) - len(retained_handlers)
-        if retained_handlers:
-            retained_groups.append({**group, "hooks": retained_handlers})
-        elif set(group) - {"matcher", "hooks"}:
-            retained_groups.append({**group, "hooks": []})
+        if not isinstance(groups, list):
+            raise RuntimeError(f"Claude settings hooks.{event_name} must be an array")
 
-    if retained_groups:
-        hooks["PreToolUse"] = retained_groups
-    else:
-        hooks.pop("PreToolUse", None)
+        retained_groups: list[Any] = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                retained_groups.append(group)
+                continue
+            handlers = group["hooks"]
+            retained_handlers = [
+                handler for handler in handlers if not is_managed_handler(handler)
+            ]
+            removed += len(handlers) - len(retained_handlers)
+            if retained_handlers:
+                retained_groups.append({**group, "hooks": retained_handlers})
+            elif set(group) - {"matcher", "hooks"}:
+                retained_groups.append({**group, "hooks": []})
+
+        if retained_groups:
+            hooks[event_name] = retained_groups
+        else:
+            hooks.pop(event_name, None)
     return removed
 
 
@@ -138,15 +142,16 @@ def add_managed_handler(
     hooks = settings.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise RuntimeError("Claude settings 'hooks' must be an object")
-    groups = hooks.setdefault("PreToolUse", [])
-    if not isinstance(groups, list):
-        raise RuntimeError("Claude settings hooks.PreToolUse must be an array")
-    groups.append(
-        {
-            "matcher": "Read",
-            "hooks": [managed_handler(claude_hook, log_path)],
-        }
-    )
+    for event_name in CLAUDE_HOOK_EVENTS:
+        groups = hooks.setdefault(event_name, [])
+        if not isinstance(groups, list):
+            raise RuntimeError(f"Claude settings hooks.{event_name} must be an array")
+        groups.append(
+            {
+                "matcher": "Read",
+                "hooks": [managed_handler(claude_hook, log_path)],
+            }
+        )
 
 
 def read_settings(path: Path) -> dict[str, Any]:
@@ -233,15 +238,16 @@ def status() -> None:
     paths = install_paths()
     settings = read_settings(paths["claude_settings"])
     hooks = settings.get("hooks", {})
-    groups = hooks.get("PreToolUse", []) if isinstance(hooks, dict) else []
-    handler_count = sum(
-        1
-        for group in groups
-        if isinstance(group, dict) and isinstance(group.get("hooks"), list)
-        for handler in group["hooks"]
-        if is_managed_handler(handler)
-    )
-    print(f"Claude hook config: {handler_count} managed handler(s)")
+    for event_name in CLAUDE_HOOK_EVENTS:
+        groups = hooks.get(event_name, []) if isinstance(hooks, dict) else []
+        handler_count = sum(
+            1
+            for group in groups
+            if isinstance(group, dict) and isinstance(group.get("hooks"), list)
+            for handler in group["hooks"]
+            if is_managed_handler(handler)
+        )
+        print(f"Claude {event_name} hook config: {handler_count} managed handler(s)")
     print(
         f"Claude hook file:   {paths['claude_hook']} "
         f"({'present' if paths['claude_hook'].is_file() else 'missing'})"

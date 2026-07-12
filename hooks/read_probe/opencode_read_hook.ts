@@ -9,39 +9,68 @@ function logPath() {
   return process.env.AUDITCOV_READ_HOOK_LOG ?? join(stateHome, "auditcov-read-hook-probe", "events.jsonl")
 }
 
+let appendQueue = Promise.resolve()
+
+async function appendEvent(client: any, event: Record<string, unknown>) {
+  appendQueue = appendQueue.then(async () => {
+    const path = logPath()
+    try {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+      await appendFile(path, JSON.stringify(event) + "\n", { encoding: "utf8", mode: 0o600 })
+    } catch (error) {
+      await client.app
+        .log({
+          body: {
+            service: "auditcov-read-hook-probe",
+            level: "error",
+            message: "Failed to record read tool hook event",
+            extra: { error: String(error), path },
+          },
+        })
+        .catch(() => {})
+    }
+  })
+  await appendQueue
+}
+
 export const AuditCovReadHookProbe: Plugin = async ({ client }) => {
   return {
     "tool.execute.before": async (input, output) => {
       if (input.tool.toLowerCase() !== "read") return
 
-      const path = logPath()
-      const event = {
+      await appendEvent(client, {
         recorded_at: new Date().toISOString(),
         probe_client: "opencode",
         hook: "tool.execute.before",
+        phase: "before",
+        outcome: "attempted",
         pid: process.pid,
         session_id: input.sessionID,
         call_id: input.callID,
         tool_name: input.tool,
         read_parameters: output.args,
         hook_input: input,
-      }
+      })
+    },
+    "tool.execute.after": async (input, output) => {
+      if (input.tool.toLowerCase() !== "read") return
 
-      try {
-        await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-        await appendFile(path, JSON.stringify(event) + "\n", { encoding: "utf8", mode: 0o600 })
-      } catch (error) {
-        await client.app
-          .log({
-            body: {
-              service: "auditcov-read-hook-probe",
-              level: "error",
-              message: "Failed to record read tool parameters",
-              extra: { error: String(error), path },
-            },
-          })
-          .catch(() => {})
-      }
+      await appendEvent(client, {
+        recorded_at: new Date().toISOString(),
+        probe_client: "opencode",
+        hook: "tool.execute.after",
+        phase: "after",
+        // OpenCode exposes a generic after-execution hook rather than a
+        // success-specific hook. Consumers must inspect the returned result.
+        outcome: "completed",
+        pid: process.pid,
+        session_id: input.sessionID,
+        call_id: input.callID,
+        tool_name: input.tool,
+        read_parameters: input.args,
+        tool_result: output,
+        hook_input: input,
+      })
     },
   }
 }

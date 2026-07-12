@@ -1,11 +1,13 @@
 # Read Hook Probes for Claude Code and OpenCode
 
-These hooks record the parameters passed to the built-in file-reading tool before it executes:
+These hooks record both the attempted parameters and the post-execution result of the built-in file-reading tool:
 
-- Claude Code: `PreToolUse` matched on `Read`.
-- OpenCode: `tool.execute.before` matched on `read`.
+- Claude Code: `PreToolUse(Read)` and `PostToolUse(Read)`.
+- OpenCode: `tool.execute.before(read)` and `tool.execute.after(read)`.
 
 Both append normalized events to `~/.local/state/auditcov-read-hook-probe/events.jsonl`. The hooks observe only the built-in Read/read tool. They do not record direct reads performed through Bash, PowerShell, Grep, LSP, or another MCP server.
+
+`after` events include the complete tool result and can therefore contain source-file contents. The log is created with user-only permissions, but it should still be treated as sensitive audit data. Claude's `PostToolUse` is success-specific and uses `outcome: "succeeded"`; OpenCode's generic `tool.execute.after` uses the conservative `outcome: "completed"`, so consumers must inspect its result before counting coverage.
 
 ## Install in WSL
 
@@ -16,7 +18,7 @@ python3 scripts/install_read_hook_probes_wsl.py install
 python3 scripts/install_read_hook_probes_wsl.py status
 ```
 
-The installer adds one managed `PreToolUse(Read)` handler to `~/.claude/settings.json`, copies its Python recorder under `~/.local/share/auditcov-read-hook-probe/`, and installs one OpenCode TS plugin under `~/.config/opencode/plugins/`. Existing unrelated Claude hooks and OpenCode configuration are preserved.
+The installer adds managed `PreToolUse(Read)` and `PostToolUse(Read)` handlers to `~/.claude/settings.json`, copies their shared Python recorder under `~/.local/share/auditcov-read-hook-probe/`, and installs one OpenCode TS plugin under `~/.config/opencode/plugins/`. Existing unrelated Claude hooks and OpenCode configuration are preserved.
 
 The Claude handler stores the complete Python invocation in the `command` field. This shell-form configuration is intentional: Claude Code 2.1.138 can display an `args`-based handler in `/hooks` while launching only the bare `python3` executable.
 
@@ -143,6 +145,15 @@ Filter by client or show only the newest records:
 python3 scripts/show_read_hook_probe_log.py --client claude-code
 python3 scripts/show_read_hook_probe_log.py --client opencode --tail 10
 ```
+
+Show only successful completion records:
+
+```bash
+python3 scripts/show_read_hook_probe_log.py --client claude-code --phase after
+python3 scripts/show_read_hook_probe_log.py --client opencode --phase after
+```
+
+For a successful read, expect two records with the same `session_id` and `call_id`: a `before/attempted` record followed by an `after` record containing `tool_result`. Claude labels that record `succeeded`; OpenCode labels it `completed`. A missing-file test has no Claude success record. OpenCode may omit its after record or expose an error-shaped completed result depending on the tool path, and neither form should count as coverage.
 
 Normalized records contain `probe_client`, `session_id`, `call_id`, `tool_name`, `read_parameters`, and the original hook input where available.
 

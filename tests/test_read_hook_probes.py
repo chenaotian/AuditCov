@@ -14,6 +14,7 @@ from scripts.install_read_hook_probes_wsl import (
     managed_handler,
     remove_managed_handlers,
 )
+from scripts.show_read_hook_probe_log import load_events
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +51,39 @@ class ReadHookProbeTests(unittest.TestCase):
             self.assertEqual(event["session_id"], "session-123")
             self.assertEqual(event["call_id"], "toolu-456")
             self.assertEqual(event["read_parameters"], hook_input["tool_input"])
+            self.assertEqual(event["phase"], "before")
+            self.assertEqual(event["outcome"], "attempted")
+
+    def test_claude_post_hook_records_successful_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "events.jsonl"
+            hook_input = {
+                "session_id": "session-123",
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Read",
+                "tool_use_id": "toolu-456",
+                "tool_input": {"file_path": "/repo/src/main.py", "limit": 2},
+                "tool_response": {
+                    "type": "text",
+                    "file": {"content": "line one\nline two\n", "numLines": 2},
+                },
+                "duration_ms": 12,
+            }
+
+            subprocess.run(
+                [sys.executable, str(CLAUDE_HOOK), "--log", str(log_path)],
+                input=json.dumps(hook_input),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            event = json.loads(log_path.read_text(encoding="utf-8"))
+            self.assertEqual(event["hook"], "PostToolUse")
+            self.assertEqual(event["phase"], "after")
+            self.assertEqual(event["outcome"], "succeeded")
+            self.assertEqual(event["tool_result"], hook_input["tool_response"])
+            self.assertEqual(event["duration_ms"], 12)
 
     def test_claude_hook_ignores_non_read_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -74,6 +108,7 @@ class ReadHookProbeTests(unittest.TestCase):
 
     def test_installer_preserves_unrelated_claude_hooks(self) -> None:
         existing_handler = {"type": "command", "command": "existing-hook"}
+        existing_post_handler = {"type": "command", "command": "existing-post-hook"}
         settings = {
             "hooks": {
                 "PreToolUse": [
@@ -91,7 +126,10 @@ class ReadHookProbeTests(unittest.TestCase):
                             }
                         ],
                     },
-                ]
+                ],
+                "PostToolUse": [
+                    {"matcher": "Write", "hooks": [existing_post_handler]}
+                ],
             }
         }
 
@@ -102,10 +140,14 @@ class ReadHookProbeTests(unittest.TestCase):
         )
         removed = remove_managed_handlers(settings)
 
-        self.assertEqual(removed, 1)
+        self.assertEqual(removed, 2)
         self.assertEqual(
             settings["hooks"]["PreToolUse"],
             [{"matcher": "Bash", "hooks": [existing_handler]}],
+        )
+        self.assertEqual(
+            settings["hooks"]["PostToolUse"],
+            [{"matcher": "Write", "hooks": [existing_post_handler]}],
         )
 
     def test_installer_uses_shell_form_for_claude_compatibility(self) -> None:
@@ -128,6 +170,28 @@ class ReadHookProbeTests(unittest.TestCase):
         self.assertIn("session_id: input.sessionID", source)
         self.assertIn("call_id: input.callID", source)
         self.assertIn("read_parameters: output.args", source)
+        self.assertIn('"tool.execute.after": async (input, output)', source)
+        self.assertIn("read_parameters: input.args", source)
+        self.assertIn("tool_result: output", source)
+        self.assertIn('outcome: "completed"', source)
+
+    def test_log_viewer_filters_successful_after_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "events.jsonl"
+            events = [
+                {"probe_client": "claude-code", "phase": "before"},
+                {"probe_client": "claude-code", "phase": "after"},
+                {"probe_client": "opencode", "phase": "after"},
+            ]
+            log_path.write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                load_events(log_path, "claude-code", "after"),
+                [{"probe_client": "claude-code", "phase": "after"}],
+            )
 
 
 if __name__ == "__main__":

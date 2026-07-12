@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code PreToolUse hook that records built-in Read tool parameters."""
+"""Record Claude Code built-in Read tool attempts and successful results."""
 
 from __future__ import annotations
 
@@ -11,7 +11,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - only the WSL/Linux install uses flock.
+    fcntl = None
+
 INSTALL_MARKER = "AuditCov Read hook probe"
+SUPPORTED_EVENTS = {
+    "PreToolUse": ("before", "attempted"),
+    "PostToolUse": ("after", "succeeded"),
+}
 
 
 def utc_now() -> str:
@@ -30,20 +39,38 @@ def append_event(log_path: Path, event: dict[str, Any]) -> None:
     )
     log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(log_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    locked = False
     try:
-        os.write(descriptor, encoded)
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            locked = True
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("failed to append the complete hook event")
+            remaining = remaining[written:]
     finally:
+        if fcntl is not None and locked:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
 
 
 def build_event(raw_input: str, hook_input: dict[str, Any]) -> dict[str, Any] | None:
     if hook_input.get("tool_name") != "Read":
         return None
+    hook_event = hook_input.get("hook_event_name", "PreToolUse")
+    event_state = SUPPORTED_EVENTS.get(hook_event)
+    if event_state is None:
+        return None
+    phase, outcome = event_state
     parameters = hook_input.get("tool_input")
-    return {
+    event = {
         "recorded_at": utc_now(),
         "probe_client": "claude-code",
-        "hook": "PreToolUse",
+        "hook": hook_event,
+        "phase": phase,
+        "outcome": outcome,
         "pid": os.getpid(),
         "session_id": hook_input.get("session_id"),
         "call_id": hook_input.get("tool_use_id"),
@@ -52,6 +79,10 @@ def build_event(raw_input: str, hook_input: dict[str, Any]) -> dict[str, Any] | 
         "raw_input": raw_input,
         "hook_input": hook_input,
     }
+    if hook_event == "PostToolUse":
+        event["tool_result"] = hook_input.get("tool_response")
+        event["duration_ms"] = hook_input.get("duration_ms")
+    return event
 
 
 def parse_args() -> argparse.Namespace:

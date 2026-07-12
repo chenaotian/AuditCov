@@ -16,7 +16,9 @@ def default_log_path() -> Path:
     return root / "auditcov-read-hook-probe" / "events.jsonl"
 
 
-def load_events(path: Path, client: str | None) -> list[dict[str, Any]]:
+def load_events(
+    path: Path, client: str | None, phase: str | None = None
+) -> list[dict[str, Any]]:
     events = []
     if not path.is_file():
         return events
@@ -30,6 +32,8 @@ def load_events(path: Path, client: str | None) -> list[dict[str, Any]]:
             continue
         if client and event.get("probe_client") != client:
             continue
+        if phase and event.get("phase") != phase:
+            continue
         events.append(event)
     return events
 
@@ -38,13 +42,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log", type=Path, default=default_log_path())
     parser.add_argument("--client", choices=("claude-code", "opencode"))
+    parser.add_argument("--phase", choices=("before", "after"))
     parser.add_argument("--tail", type=int, default=0, help="Show only the last N matching events.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    events = load_events(args.log.expanduser().resolve(), args.client)
+    events = load_events(args.log.expanduser().resolve(), args.client, args.phase)
     if args.tail > 0:
         events = events[-args.tail :]
     for event in events:

@@ -172,6 +172,8 @@ python -m unittest discover -s tests
 
 To compare the complete `tools/call` parameters sent by Claude Code and OpenCode, including any client-provided `params._meta`, use the dependency-free WSL probe described in [docs/mcp-parameter-probe.md](docs/mcp-parameter-probe.md).
 
+To compare the parameters passed to the clients' built-in file-reading tools before execution, install the Claude Code `PreToolUse(Read)` and OpenCode `tool.execute.before(read)` probes described in [docs/read-hook-probes.md](docs/read-hook-probes.md).
+
 ## Codex Plugin Package
 
 The repo contains a local Codex plugin package at:

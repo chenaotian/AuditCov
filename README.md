@@ -168,6 +168,10 @@ Run tests:
 python -m unittest discover -s tests
 ```
 
+## MCP Client Parameter Probe
+
+To compare the complete `tools/call` parameters sent by Claude Code and OpenCode, including any client-provided `params._meta`, use the dependency-free WSL probe described in [docs/mcp-parameter-probe.md](docs/mcp-parameter-probe.md).
+
 ## Codex Plugin Package
 
 The repo contains a local Codex plugin package at:

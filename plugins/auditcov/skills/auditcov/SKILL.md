@@ -31,8 +31,8 @@ If a read is truncated, continue from `next_start_line`. Use coverage and file d
 
 ## Web semantics
 
-Each Web project has one frozen whole-repository source snapshot shared by every Agent session. Sessions are labeled by Agent type and native identity: Codex `thread_id`, Claude Code `session_id`, or OpenCode `sessionID`.
+Each Web project has one frozen whole-repository source snapshot shared by every Agent session. Parent sessions can be expanded to show Claude Code or OpenCode subagents. Parent and child checkboxes are independent: selecting a parent includes only that parent's own reads, and a child must be selected separately to include its reads.
 
-For selected sessions, the numerator is the union of their successful covered ranges and the denominator remains the project's single frozen snapshot. Before-hook attempts do not count. Reads outside configured projects are ignored.
+For exactly the selected parent and child sessions, the numerator is the union of their successful covered ranges and the denominator remains the project's single frozen snapshot. Before-hook attempts do not count. Reads outside configured projects are ignored.
 
 Always describe the metric as objective read coverage, never as proof that the security audit is complete.

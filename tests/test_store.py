@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -78,6 +79,93 @@ class StoreTests(unittest.TestCase):
         first_id = next(item["id"] for item in detail["sessions"] if item["agent_type"] == "claude-code")
         selected = self.store.get_project_tree(self.project["id"], [first_id])
         self.assertEqual(selected["covered_lines"], 2)
+
+    def test_parent_and_child_sessions_have_independent_coverage(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        child = AgentContext(
+            "opencode",
+            "child-session",
+            parent_agent_session_id="parent-session",
+            agent_session_title="Audit src (@general subagent)",
+            parent_agent_session_title="Repository audit",
+        )
+        self.store.prepare_read(child, "child-call", path, 3, 4)
+        self.store.complete_read(child, "child-call", path, True)
+
+        detail = self.store.get_project(self.project["id"])
+        self.assertEqual(detail["session_count"], 2)
+        parent = next(
+            item for item in detail["sessions"]
+            if item["agent_session_id"] == "parent-session"
+        )
+        child_summary = next(
+            item for item in detail["sessions"]
+            if item["agent_session_id"] == "child-session"
+        )
+        self.assertEqual(parent["covered_lines"], 0)
+        self.assertFalse(parent["is_subagent"])
+        self.assertEqual(parent["session_title"], "Repository audit")
+        self.assertEqual(child_summary["parent_session_id"], parent["id"])
+        self.assertTrue(child_summary["is_subagent"])
+        self.assertEqual(
+            self.store.get_project_tree(self.project["id"], [child_summary["id"]])[
+                "covered_lines"
+            ],
+            2,
+        )
+
+        parent_context = AgentContext(
+            "opencode", "parent-session", agent_session_title="Repository audit"
+        )
+        self.store.prepare_read(parent_context, "parent-call", path, 1, 2)
+        self.store.complete_read(parent_context, "parent-call", path, True)
+        parent_only = self.store.get_project_tree(self.project["id"], [parent["id"]])
+        child_only = self.store.get_project_tree(
+            self.project["id"], [child_summary["id"]]
+        )
+        both = self.store.get_project_tree(
+            self.project["id"], [parent["id"], child_summary["id"]]
+        )
+        self.assertEqual(parent_only["covered_lines"], 2)
+        self.assertEqual(child_only["covered_lines"], 2)
+        self.assertEqual(both["covered_lines"], 4)
+
+    def test_existing_session_schema_is_migrated(self) -> None:
+        path = self.root / "legacy.sqlite3"
+        connection = sqlite3.connect(path)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE ac_projects(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    project_root TEXT NOT NULL UNIQUE,
+                    root_key TEXT NOT NULL UNIQUE,
+                    snapshot_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE ac_sessions(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    agent_type TEXT NOT NULL,
+                    agent_session_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, agent_type, agent_session_id)
+                );
+                """
+            )
+        finally:
+            connection.close()
+        migrated = AuditCovStore(path)
+        try:
+            columns = {
+                row["name"] for row in migrated.conn.execute("PRAGMA table_info(ac_sessions)")
+            }
+            self.assertIn("session_title", columns)
+            self.assertIn("parent_session_id", columns)
+        finally:
+            migrated.close()
 
     def test_parallel_completions_merge_without_losing_ranges(self) -> None:
         path = str(self.repo / "src" / "a.py")

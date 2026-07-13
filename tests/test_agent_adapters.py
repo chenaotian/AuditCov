@@ -74,6 +74,22 @@ class ClaudeHookTests(unittest.TestCase):
         self.assertEqual((payload["start_line"], payload["end_line"]), (2, 4))
         self.assertEqual(payload["tool_result"]["content"], "source")
 
+    def test_subagent_uses_agent_id_and_links_to_parent_session(self) -> None:
+        payload = self.hook.common_payload(
+            {
+                "session_id": "parent-session",
+                "agent_id": "agent-child",
+                "agent_type": "general-purpose",
+                "tool_use_id": "call-1",
+                "cwd": str(ROOT),
+            },
+            {"file_path": "README.md"},
+        )
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["agent_session_id"], "agent-child")
+        self.assertEqual(payload["parent_agent_session_id"], "parent-session")
+        self.assertEqual(payload["agent_session_title"], "general-purpose")
+
 
 class OpenCodePluginTests(unittest.TestCase):
     def test_plugin_has_two_hooks_and_mutates_before_args(self) -> None:
@@ -81,8 +97,19 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertIn('"tool.execute.before"', source)
         self.assertIn('"tool.execute.after"', source)
         self.assertIn("output.args.limit = result.limit", source)
-        self.assertIn("agent_session_id: input.sessionID", source)
+        self.assertIn("client.session.get", source)
+        self.assertIn("parent_agent_session_id: parent?.id", source)
+        self.assertIn("...identity", source)
         self.assertIn("call_id: input.callID", source)
+
+    def test_web_session_selector_keeps_parent_and_child_checkboxes_independent(self) -> None:
+        source = (ROOT / "auditcov_mcp" / "web_static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("renderSessionNode", source)
+        self.assertIn("session.parent_session_id", source)
+        self.assertIn("Include only this agent's Read coverage", source)
+        self.assertNotIn("children.map((child) => child.id)", source)
 
 
 class InstallerTests(unittest.TestCase):

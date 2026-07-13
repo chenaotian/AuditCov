@@ -9,6 +9,7 @@ const state = {
   coverage: null,
   settings: null,
   expandedTreePaths: new Set([""]),
+  expandedSessionIds: new Set(),
 };
 
 const ids = [
@@ -67,6 +68,7 @@ async function loadProject(projectId) {
   if (changed) {
     state.selectedFilePath = null;
     state.expandedTreePaths = new Set([""]);
+    state.expandedSessionIds = new Set();
   }
   state.detail = await fetchJson(`/api/projects/${projectId}`);
   const available = new Set(state.detail.sessions.map((session) => session.id));
@@ -223,31 +225,93 @@ function renderSessionSelector(sessions) {
     list.className += " empty-state";
     list.textContent = "No tracked Read calls yet.";
   }
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const childrenByParent = new Map();
   for (const session of sessions) {
-    const label = document.createElement("label");
-    label.className = `thread-row${state.selectedSessionIds.has(session.id) ? " selected" : ""}`;
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = state.selectedSessionIds.has(session.id);
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.selectedSessionIds.add(session.id);
-      else state.selectedSessionIds.delete(session.id);
-      loadCoverage();
-    });
-    const main = document.createElement("div");
-    main.className = "thread-main";
-    const title = document.createElement("div");
-    title.className = "thread-id";
-    title.textContent = `${session.agent_type} · ${shortId(session.agent_session_id)}`;
-    title.title = session.agent_session_id;
-    const sub = document.createElement("div");
-    sub.className = "thread-targets";
-    sub.textContent = `${formatPercent(session.percent)} | ${session.covered_lines}/${session.total_lines}`;
-    main.append(title, sub);
-    label.append(checkbox, main);
-    list.appendChild(label);
+    if (!session.parent_session_id || !byId.has(session.parent_session_id)) continue;
+    const children = childrenByParent.get(session.parent_session_id) || [];
+    children.push(session);
+    childrenByParent.set(session.parent_session_id, children);
+  }
+  const roots = sessions.filter(
+    (session) => !session.parent_session_id || !byId.has(session.parent_session_id),
+  );
+  const rendered = new Set();
+  for (const session of roots) {
+    list.appendChild(renderSessionNode(session, childrenByParent, rendered));
+  }
+  for (const session of sessions) {
+    if (!rendered.has(session.id)) {
+      list.appendChild(renderSessionNode(session, childrenByParent, rendered));
+    }
   }
   els.threadSelector.appendChild(list);
+}
+
+function renderSessionNode(session, childrenByParent, rendered) {
+  rendered.add(session.id);
+  const wrapper = document.createElement("div");
+  wrapper.className = "session-node";
+  const children = (childrenByParent.get(session.id) || []).filter(
+    (child) => !rendered.has(child.id),
+  );
+  const expanded = children.length > 0 && state.expandedSessionIds.has(session.id);
+  const row = document.createElement("div");
+  row.className = `thread-row${state.selectedSessionIds.has(session.id) ? " selected" : ""}`;
+  const expander = document.createElement(children.length ? "button" : "span");
+  expander.className = `session-expander${children.length ? "" : " empty"}`;
+  if (children.length) {
+    expander.type = "button";
+    expander.textContent = expanded ? "-" : "+";
+    expander.title = expanded ? "Collapse child agents" : "Expand child agents";
+    expander.setAttribute("aria-expanded", String(expanded));
+    expander.addEventListener("click", () => {
+      if (expanded) state.expandedSessionIds.delete(session.id);
+      else state.expandedSessionIds.add(session.id);
+      renderSessionSelector(state.detail.sessions);
+      saveState();
+    });
+  }
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = state.selectedSessionIds.has(session.id);
+  checkbox.title = "Include only this agent's Read coverage";
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) state.selectedSessionIds.add(session.id);
+    else state.selectedSessionIds.delete(session.id);
+    loadCoverage();
+  });
+  const main = document.createElement("div");
+  main.className = "thread-main";
+  const title = document.createElement("div");
+  title.className = "thread-id";
+  const displayTitle = typeof session.session_title === "string"
+    ? session.session_title.trim()
+    : "";
+  title.textContent = displayTitle
+    ? `${session.agent_type} · ${displayTitle}`
+    : `${session.agent_type} · ${shortId(session.agent_session_id)}`;
+  title.title = displayTitle
+    ? `${displayTitle}\n${session.agent_session_id}`
+    : session.agent_session_id;
+  const sub = document.createElement("div");
+  sub.className = "thread-targets";
+  const kind = children.length
+    ? `${children.length} child agent${children.length === 1 ? "" : "s"}`
+    : session.parent_session_id ? "child agent" : "agent session";
+  sub.textContent = `${kind} · ${shortId(session.agent_session_id)} · ${formatPercent(session.percent)} | ${session.covered_lines}/${session.total_lines}`;
+  main.append(title, sub);
+  row.append(expander, checkbox, main);
+  wrapper.appendChild(row);
+  if (children.length) {
+    const childList = document.createElement("div");
+    childList.className = `session-children${expanded ? "" : " collapsed"}`;
+    for (const child of children) {
+      childList.appendChild(renderSessionNode(child, childrenByParent, rendered));
+    }
+    wrapper.appendChild(childList);
+  }
+  return wrapper;
 }
 
 function renderTree(root) {
@@ -361,6 +425,7 @@ function saveState() {
     selectedSessionIds: [...state.selectedSessionIds],
     selectedFilePath: state.selectedFilePath,
     expandedTreePaths: [...state.expandedTreePaths],
+    expandedSessionIds: [...state.expandedSessionIds],
   }));
 }
 function restoreState() {
@@ -370,5 +435,6 @@ function restoreState() {
     if (Array.isArray(saved.selectedSessionIds)) state.selectedSessionIds = new Set(saved.selectedSessionIds);
     if (typeof saved.selectedFilePath === "string") state.selectedFilePath = saved.selectedFilePath;
     if (Array.isArray(saved.expandedTreePaths)) state.expandedTreePaths = new Set(saved.expandedTreePaths);
+    if (Array.isArray(saved.expandedSessionIds)) state.expandedSessionIds = new Set(saved.expandedSessionIds);
   } catch (_error) { return; }
 }

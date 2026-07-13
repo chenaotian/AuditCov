@@ -356,21 +356,25 @@ h1 {
 .thread-list {
   display: grid;
   gap: 6px;
-  max-height: 118px;
+  max-height: 210px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.session-node {
+  display: grid;
+  gap: 5px;
 }
 
 .thread-row {
   display: grid;
   min-height: 36px;
-  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-columns: 20px 20px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--panel);
-  cursor: pointer;
   padding: 6px 8px;
 }
 
@@ -383,7 +387,45 @@ h1 {
 .thread-row input {
   width: 15px;
   height: 15px;
+  cursor: pointer;
   margin: 0;
+}
+
+.session-expander {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+
+.session-expander:hover {
+  border-color: var(--accent);
+}
+
+.session-expander.empty {
+  border-color: transparent;
+  cursor: default;
+}
+
+.session-children {
+  display: grid;
+  gap: 5px;
+  margin-left: 20px;
+  border-left: 1px solid var(--line);
+  padding-left: 8px;
+}
+
+.session-children.collapsed {
+  display: none;
 }
 
 .thread-main {

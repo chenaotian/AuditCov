@@ -45,6 +45,9 @@ class AgentContext:
     agent_type: str
     agent_session_id: str
     turn_id: str | None = None
+    parent_agent_session_id: str | None = None
+    agent_session_title: str | None = None
+    parent_agent_session_title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -503,10 +506,13 @@ class AuditCovStore:
                     project_id INTEGER NOT NULL,
                     agent_type TEXT NOT NULL,
                     agent_session_id TEXT NOT NULL,
+                    session_title TEXT,
+                    parent_session_id INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(project_id, agent_type, agent_session_id),
-                    FOREIGN KEY(project_id) REFERENCES ac_projects(id) ON DELETE CASCADE
+                    FOREIGN KEY(project_id) REFERENCES ac_projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY(parent_session_id) REFERENCES ac_sessions(id) ON DELETE SET NULL
                 );
                 CREATE TABLE IF NOT EXISTS ac_read_events(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -536,6 +542,20 @@ class AuditCovStore:
                 CREATE INDEX IF NOT EXISTS ac_ranges_path
                     ON ac_covered_ranges(session_id, path);
                 """
+            )
+            columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(ac_sessions)")
+            }
+            if "session_title" not in columns:
+                self.conn.execute("ALTER TABLE ac_sessions ADD COLUMN session_title TEXT")
+            if "parent_session_id" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE ac_sessions ADD COLUMN parent_session_id INTEGER "
+                    "REFERENCES ac_sessions(id) ON DELETE SET NULL"
+                )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS ac_sessions_parent ON ac_sessions(parent_session_id)"
             )
 
     def _snapshot_files(self, root: Path) -> list[FileSnapshot]:
@@ -615,23 +635,65 @@ class AuditCovStore:
     def _ensure_session(self, project_id: int, context: AgentContext) -> int:
         now = utc_now()
         with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO ac_sessions(
-                    project_id, agent_type, agent_session_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(project_id, agent_type, agent_session_id)
-                DO UPDATE SET updated_at = excluded.updated_at
-                """,
-                (project_id, context.agent_type, context.agent_session_id, now, now),
+            parent_session_id = None
+            if context.parent_agent_session_id is not None:
+                parent_session_id = self._upsert_session_row(
+                    project_id,
+                    context.agent_type,
+                    context.parent_agent_session_id,
+                    context.parent_agent_session_title,
+                    None,
+                    now,
+                )
+            return self._upsert_session_row(
+                project_id,
+                context.agent_type,
+                context.agent_session_id,
+                context.agent_session_title,
+                parent_session_id,
+                now,
             )
-            row = self.conn.execute(
-                """
-                SELECT id FROM ac_sessions
-                WHERE project_id = ? AND agent_type = ? AND agent_session_id = ?
-                """,
-                (project_id, context.agent_type, context.agent_session_id),
-            ).fetchone()
+
+    def _upsert_session_row(
+        self,
+        project_id: int,
+        agent_type: str,
+        agent_session_id: str,
+        session_title: str | None,
+        parent_session_id: int | None,
+        now: str,
+    ) -> int:
+        self.conn.execute(
+            """
+            INSERT INTO ac_sessions(
+                project_id, agent_type, agent_session_id, session_title,
+                parent_session_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, agent_type, agent_session_id)
+            DO UPDATE SET
+                session_title = COALESCE(excluded.session_title, ac_sessions.session_title),
+                parent_session_id = COALESCE(
+                    excluded.parent_session_id, ac_sessions.parent_session_id
+                ),
+                updated_at = excluded.updated_at
+            """,
+            (
+                project_id,
+                agent_type,
+                agent_session_id,
+                session_title,
+                parent_session_id,
+                now,
+                now,
+            ),
+        )
+        row = self.conn.execute(
+            """
+            SELECT id FROM ac_sessions
+            WHERE project_id = ? AND agent_type = ? AND agent_session_id = ?
+            """,
+            (project_id, agent_type, agent_session_id),
+        ).fetchone()
         return int(row["id"])
 
     def _sessions(self, project_id: int) -> list[sqlite3.Row]:
@@ -648,6 +710,13 @@ class AuditCovStore:
             "id": int(row["id"]),
             "agent_type": row["agent_type"],
             "agent_session_id": row["agent_session_id"],
+            "session_title": row["session_title"],
+            "parent_session_id": (
+                int(row["parent_session_id"])
+                if row["parent_session_id"] is not None
+                else None
+            ),
+            "is_subagent": row["parent_session_id"] is not None,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             **values,
@@ -816,6 +885,8 @@ def validate_context(context: AgentContext) -> None:
         raise AuditCovError("agent_type must be codex, claude-code, or opencode")
     if not context.agent_session_id:
         raise AuditCovError("agent_session_id must not be empty")
+    if context.parent_agent_session_id == context.agent_session_id:
+        raise AuditCovError("parent_agent_session_id must differ from agent_session_id")
 
 
 def positive_int(value: Any, name: str) -> int:

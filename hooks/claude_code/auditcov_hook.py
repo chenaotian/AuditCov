@@ -91,15 +91,22 @@ def result_range(result: Any, fallback_start: int, fallback_end: int | None) -> 
 
 def common_payload(hook_input: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any] | None:
     session_id = hook_input.get("session_id")
+    agent_id = hook_input.get("agent_id")
+    agent_type = hook_input.get("agent_type")
     call_id = hook_input.get("tool_use_id")
     file_path = parameters.get("file_path")
     if not all(isinstance(value, str) and value for value in (session_id, call_id, file_path)):
         warn("Read hook input is missing session_id, tool_use_id, or file_path")
         return None
+    is_subagent = isinstance(agent_id, str) and bool(agent_id)
     start, end = line_range(parameters)
     return {
         "agent_type": "claude-code",
-        "agent_session_id": session_id,
+        "agent_session_id": agent_id if is_subagent else session_id,
+        "parent_agent_session_id": session_id if is_subagent else None,
+        "agent_session_title": (
+            agent_type if isinstance(agent_type, str) and agent_type else None
+        ),
         "call_id": call_id,
         "file_path": absolute_file_path(file_path, hook_input.get("cwd")),
         "start_line": start,

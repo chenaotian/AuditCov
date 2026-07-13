@@ -62,6 +62,7 @@ The installer adds global `PreToolUse(Read)` and `PostToolUse(Read)` handlers wi
 - Before execution, the adapter reports the attempted path/range. If the file belongs to no configured project, it returns no output and changes nothing.
 - For a tracked file, the server can reduce `limit` so the complete-line payload stays within 256 KiB.
 - `PostToolUse` runs only after a successful Read and confirms the actual range to the server. Only this phase changes coverage.
+- Reads made inside a subagent use its `agent_id` as an independent coverage session and retain the main `session_id` as the parent.
 - A server outage never blocks Read. It appends a warning to the platform state directory's `auditcov/hook-warnings.log`.
 
 ### OpenCode
@@ -71,6 +72,7 @@ The installer copies a global OpenCode TypeScript plugin under the user's OpenCo
 - `tool.execute.before(read)` reports the attempt and mutates `output.args` only for a tracked project file.
 - Tracked reads are reduced at complete-line boundaries to stay within 51,200 bytes.
 - `tool.execute.after(read)` reports the result and successful returned range.
+- The plugin resolves and caches each OpenCode Session's `parentID`, allowing General subagents to be grouped under their parent session.
 - A server outage leaves Read unchanged and writes the same local warning log.
 
 ## Project and coverage rules
@@ -81,9 +83,10 @@ The installer copies a global OpenCode TypeScript plugin under the user's OpenCo
 - Symlinked files/directories and fixed generated/vendor directories are skipped.
 - Reads outside configured projects, and reads of files outside a frozen source snapshot, are ignored.
 - The denominator is shared by all sessions under the project.
-- A session is identified by `codex/thread_id`, `claude-code/session_id`, or `opencode/sessionID`.
+- A parent session is identified by `codex/thread_id`, `claude-code/session_id`, or a root OpenCode `sessionID`. Claude `agent_id` and child OpenCode `sessionID` values are stored as independent child sessions.
 - Before events are attempts only. Coverage changes only after confirmed success.
-- Selecting multiple sessions in the Web UI uses the union of their covered line ranges against the one project snapshot.
+- Parent and child checkboxes in the Web UI are independent. Selecting a parent includes only that parent's reads; select child sessions separately to include their ranges.
+- Selecting multiple sessions in the Web UI uses the union of exactly those sessions' covered line ranges against the one project snapshot.
 
 ## HTTP API
 
@@ -102,6 +105,8 @@ Agent ingestion and Codex proxy endpoints:
 - `POST /api/codex/read`
 - `GET /api/agent/coverage`
 - `GET /api/agent/file-detail`
+
+Read ingestion accepts optional `parent_agent_session_id`, `agent_session_title`, and `parent_agent_session_title` fields. The server creates a parent session row even when only its child has read a tracked file, so the Web UI can show the hierarchy without merging their coverage.
 
 The service is intentionally local and unauthenticated in v1. Do not expose it on a network interface.
 

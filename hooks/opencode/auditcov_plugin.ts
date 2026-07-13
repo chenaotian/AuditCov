@@ -7,6 +7,14 @@ import { homedir } from "node:os"
 
 const serverUrl = (process.env.AUDITCOV_SERVER_URL ?? "http://127.0.0.1:8765").replace(/\/$/, "")
 
+type SessionInfo = {
+  id: string
+  parentID?: string
+  title?: string
+}
+
+const sessionCache = new Map<string, Promise<SessionInfo>>()
+
 function warningPath() {
   const state = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state")
   return join(state, "auditcov", "hook-warnings.log")
@@ -21,6 +29,44 @@ async function warn(client: any, message: string) {
   await client.app.log({
     body: { service: "auditcov", level: "warn", message },
   }).catch(() => {})
+}
+
+async function sessionInfo(client: any, sessionID: string): Promise<SessionInfo> {
+  const cached = sessionCache.get(sessionID)
+  if (cached) return cached
+  const pending = (async () => {
+    const response = await client.session.get({ path: { id: sessionID } })
+    const value = response?.data ?? response
+    if (!value || typeof value !== "object") throw new Error(`session ${sessionID} was not found`)
+    return {
+      id: typeof value.id === "string" ? value.id : sessionID,
+      parentID: typeof value.parentID === "string" ? value.parentID : undefined,
+      title: typeof value.title === "string" && value.title.trim() ? value.title : undefined,
+    }
+  })()
+  sessionCache.set(sessionID, pending)
+  try {
+    return await pending
+  } catch (error) {
+    sessionCache.delete(sessionID)
+    throw error
+  }
+}
+
+async function sessionIdentity(client: any, sessionID: string) {
+  try {
+    const current = await sessionInfo(client, sessionID)
+    const parent = current.parentID ? await sessionInfo(client, current.parentID) : undefined
+    return {
+      agent_session_id: sessionID,
+      parent_agent_session_id: parent?.id,
+      agent_session_title: current.title,
+      parent_agent_session_title: parent?.title,
+    }
+  } catch (error) {
+    await warn(client, `unable to resolve session parent for ${sessionID}: ${String(error)}`)
+    return { agent_session_id: sessionID }
+  }
 }
 
 async function post(client: any, path: string, payload: Record<string, unknown>) {
@@ -69,9 +115,10 @@ export const AuditCov: Plugin = async ({ client, directory }) => ({
     const filePath = output.args?.filePath
     if (typeof filePath !== "string" || !filePath) return
     const range = readRange(output.args)
+    const identity = await sessionIdentity(client, input.sessionID)
     const payload = {
       agent_type: "opencode",
-      agent_session_id: input.sessionID,
+      ...identity,
       call_id: input.callID,
       file_path: isAbsolute(filePath) ? filePath : resolve(directory, filePath),
       start_line: range.start,
@@ -89,9 +136,10 @@ export const AuditCov: Plugin = async ({ client, directory }) => ({
     const filePath = args?.filePath
     if (typeof filePath !== "string" || !filePath) return
     const range = actualRange(output, readRange(args))
+    const identity = await sessionIdentity(client, input.sessionID)
     await post(client, "/api/read/after", {
       agent_type: "opencode",
-      agent_session_id: input.sessionID,
+      ...identity,
       call_id: input.callID,
       file_path: isAbsolute(filePath) ? filePath : resolve(directory, filePath),
       start_line: range.start,

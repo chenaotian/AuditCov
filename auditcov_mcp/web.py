@@ -229,6 +229,15 @@ def optional_int(payload: dict, name: str) -> int | None:
     return value
 
 
+def optional_string(payload: dict, name: str) -> str | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise AuditCovError(f"{name} must be a non-empty string or null")
+    return value
+
+
 def context_from_payload(payload: dict, required_agent: str | None = None) -> AgentContext:
     agent_type = required_string(payload, "agent_type")
     if required_agent is not None and agent_type != required_agent:
@@ -237,6 +246,9 @@ def context_from_payload(payload: dict, required_agent: str | None = None) -> Ag
         agent_type=agent_type,
         agent_session_id=required_string(payload, "agent_session_id"),
         turn_id=payload.get("turn_id") if isinstance(payload.get("turn_id"), str) else None,
+        parent_agent_session_id=optional_string(payload, "parent_agent_session_id"),
+        agent_session_title=optional_string(payload, "agent_session_title"),
+        parent_agent_session_title=optional_string(payload, "parent_agent_session_title"),
     )
 
 

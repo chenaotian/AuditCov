@@ -82,6 +82,38 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertFalse(result["tracked"])
 
+    def test_child_session_metadata_is_exposed_for_web_grouping(self) -> None:
+        _, project = self.request(
+            "POST", "/api/projects", {"project_root": str(self.repo), "name": "Repo"}
+        )
+        payload = {
+            "agent_type": "opencode",
+            "agent_session_id": "child-session",
+            "parent_agent_session_id": "parent-session",
+            "agent_session_title": "Audit src (@general subagent)",
+            "parent_agent_session_title": "Repository audit",
+            "call_id": "call-1",
+            "file_path": str(self.repo / "main.py"),
+            "start_line": 2,
+            "end_line": 3,
+        }
+        self.request("POST", "/api/read/before", payload)
+        self.request("POST", "/api/read/after", {**payload, "success": True})
+
+        _, detail = self.request("GET", f"/api/projects/{project['id']}")
+        parent = next(
+            item for item in detail["sessions"]
+            if item["agent_session_id"] == "parent-session"
+        )
+        child = next(
+            item for item in detail["sessions"]
+            if item["agent_session_id"] == "child-session"
+        )
+        self.assertEqual(parent["covered_lines"], 0)
+        self.assertEqual(parent["session_title"], "Repository audit")
+        self.assertEqual(child["parent_session_id"], parent["id"])
+        self.assertEqual(child["covered_lines"], 2)
+
     def test_store_is_closed_before_response_is_sent(self) -> None:
         events = []
 

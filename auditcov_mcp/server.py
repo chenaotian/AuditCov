@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
+import uuid
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from auditcov_mcp import __version__
-from auditcov_mcp.bypass import BypassMonitor
-from auditcov_mcp.store import AuditCovError, AuditCovStore, TaskContext, default_db_path
+from auditcov_mcp.client import AuditCovClient, AuditCovClientError
 
 JSON = dict[str, Any]
 
 
+@dataclass(frozen=True)
+class CodexContext:
+    thread_id: str
+    turn_id: str | None = None
+
+
 class McpServer:
-    def __init__(self, store: AuditCovStore, bypass_monitor: BypassMonitor | None = None) -> None:
-        self.store = store
-        self.bypass_monitor = bypass_monitor or BypassMonitor.from_environment()
-        self.tools: dict[str, Callable[[TaskContext, JSON], JSON]] = {
-            "auditcov_init_project": self._tool_init_project,
+    """Thin Codex adapter for the central AuditCov HTTP server."""
+
+    def __init__(self, client: AuditCovClient | None = None) -> None:
+        self.client = client or AuditCovClient()
+        self.tools: dict[str, Callable[[CodexContext, JSON], JSON]] = {
             "auditcov_read_file": self._tool_read_file,
             "auditcov_get_coverage": self._tool_get_coverage,
             "auditcov_get_file_detail": self._tool_get_file_detail,
@@ -26,11 +32,9 @@ class McpServer:
     def handle(self, request: JSON) -> JSON | None:
         if "id" not in request:
             return None
-
         request_id = request["id"]
         method = request.get("method")
         params = request.get("params") or {}
-
         try:
             if method == "initialize":
                 return ok(request_id, self._initialize_result())
@@ -38,9 +42,9 @@ class McpServer:
                 return ok(request_id, {"tools": tool_definitions()})
             if method == "tools/call":
                 return ok(request_id, self._call_tool(params))
-            return jsonrpc_error(request_id, -32601, f"unknown method: {method}")
-        except Exception as exc:  # pragma: no cover - defensive protocol boundary
-            return jsonrpc_error(request_id, -32603, f"internal error: {exc}")
+            return rpc_error(request_id, -32601, f"unknown method: {method}")
+        except Exception as exc:  # pragma: no cover - protocol boundary
+            return rpc_error(request_id, -32603, f"internal error: {exc}")
 
     def _initialize_result(self) -> JSON:
         return {
@@ -56,98 +60,65 @@ class McpServer:
             return tool_error(f"unknown tool: {name}")
         if not isinstance(arguments, dict):
             return tool_error("tool arguments must be an object")
-
         try:
-            context = context_from_meta(params.get("_meta"))
-            self.bypass_monitor.scan_and_log(context)
-            result = self.tools[name](context, arguments)
-            return tool_result(result)
-        except AuditCovError as exc:
+            return tool_result(self.tools[name](context_from_meta(params.get("_meta")), arguments))
+        except (ValueError, AuditCovClientError) as exc:
             return tool_error(str(exc))
 
-    def _tool_init_project(self, context: TaskContext, arguments: JSON) -> JSON:
-        project_root = arguments.get("project_root")
-        target_paths = arguments.get("target_paths")
-        if not isinstance(project_root, str):
-            raise AuditCovError("project_root must be a string")
-        if not isinstance(target_paths, list) or not all(
-            isinstance(item, str) for item in target_paths
-        ):
-            raise AuditCovError("target_paths must be a list of strings")
-        return self.store.init_project(context, project_root, target_paths)
+    def _identity(self, context: CodexContext) -> JSON:
+        return {
+            "agent_type": "codex",
+            "agent_session_id": context.thread_id,
+            "turn_id": context.turn_id,
+        }
 
-    def _tool_read_file(self, context: TaskContext, arguments: JSON) -> JSON:
+    def _tool_read_file(self, context: CodexContext, arguments: JSON) -> JSON:
         path = arguments.get("path")
         if not isinstance(path, str):
-            raise AuditCovError("path must be a string")
-        return self.store.read_file(
-            context,
-            path,
-            arguments.get("start_line"),
-            arguments.get("end_line"),
+            raise ValueError("path must be a string")
+        return self.client.post(
+            "/api/codex/read",
+            {
+                **self._identity(context),
+                "call_id": f"{context.turn_id or 'turn'}-{uuid.uuid4()}",
+                "path": path,
+                "start_line": arguments.get("start_line"),
+                "end_line": arguments.get("end_line"),
+            },
         )
 
-    def _tool_get_coverage(self, context: TaskContext, arguments: JSON) -> JSON:
+    def _tool_get_coverage(self, context: CodexContext, arguments: JSON) -> JSON:
         path = arguments.get("path")
         if path is not None and not isinstance(path, str):
-            raise AuditCovError("path must be a string or null")
-        return self.store.get_coverage(context, path)
+            raise ValueError("path must be a string or null")
+        return self.client.get(
+            "/api/agent/coverage", {**self._identity(context), "path": path}
+        )
 
-    def _tool_get_file_detail(self, context: TaskContext, arguments: JSON) -> JSON:
+    def _tool_get_file_detail(self, context: CodexContext, arguments: JSON) -> JSON:
         path = arguments.get("path")
         if not isinstance(path, str):
-            raise AuditCovError("path must be a string")
-        return self.store.get_file_detail(context, path)
+            raise ValueError("path must be a string")
+        return self.client.get(
+            "/api/agent/file-detail", {**self._identity(context), "path": path}
+        )
 
 
 def tool_definitions() -> list[JSON]:
     return [
         {
-            "name": "auditcov_init_project",
-            "title": "Initialize AuditCov Project",
-            "description": (
-                "Freeze the source-code coverage denominator for the current Codex thread. "
-                "Uses params._meta.x-codex-turn-metadata.thread_id as the task id. "
-                "Each thread can initialize AuditCov only once; use a new thread for a new audit scope."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "project_root": {
-                        "type": "string",
-                        "description": "Absolute or relative path to the repository root.",
-                    },
-                    "target_paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Repository subpaths that define the audit target.",
-                    },
-                },
-                "required": ["project_root", "target_paths"],
-                "additionalProperties": False,
-            },
-        },
-        {
             "name": "auditcov_read_file",
-            "title": "Read Target File",
+            "title": "Read Tracked Project File",
             "description": (
-                "Read complete source lines from a frozen target file and record those "
-                "returned lines as objective read coverage. Responses are capped at 40KB."
+                "Read complete source lines through the central AuditCov server and record "
+                "them for the current Codex thread. The project must first be created in the Web UI."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Target file path."},
-                    "start_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "1-based first line to read. Defaults to 1.",
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "1-based last line to read. Omit to read until EOF or cap.",
-                    },
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -156,27 +127,20 @@ def tool_definitions() -> list[JSON]:
         {
             "name": "auditcov_get_coverage",
             "title": "Get Coverage",
-            "description": "Return objective read coverage for the project, a directory, or a file.",
+            "description": "Return coverage for this Codex thread from the central server.",
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "path": {
-                        "type": ["string", "null"],
-                        "description": "Omit or null for project coverage; pass a directory or file path for scoped coverage.",
-                    }
-                },
+                "properties": {"path": {"type": ["string", "null"]}},
                 "additionalProperties": False,
             },
         },
         {
             "name": "auditcov_get_file_detail",
             "title": "Get File Coverage Detail",
-            "description": "Return exact covered and uncovered line ranges for a target file.",
+            "description": "Return covered and uncovered ranges for one tracked file.",
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Target file path."}
-                },
+                "properties": {"path": {"type": "string"}},
                 "required": ["path"],
                 "additionalProperties": False,
             },
@@ -184,36 +148,27 @@ def tool_definitions() -> list[JSON]:
     ]
 
 
-def context_from_meta(meta: Any) -> TaskContext:
+def context_from_meta(meta: Any) -> CodexContext:
     if not isinstance(meta, dict):
-        raise AuditCovError("missing MCP _meta with x-codex-turn-metadata")
-
-    turn_metadata = meta.get("x-codex-turn-metadata")
-    if isinstance(turn_metadata, str):
+        raise ValueError("missing MCP _meta with x-codex-turn-metadata")
+    value = meta.get("x-codex-turn-metadata")
+    if isinstance(value, str):
         try:
-            turn_metadata = json.loads(turn_metadata)
+            value = json.loads(value)
         except json.JSONDecodeError as exc:
-            raise AuditCovError("x-codex-turn-metadata is not valid JSON") from exc
-
-    if not isinstance(turn_metadata, dict):
-        raise AuditCovError("missing x-codex-turn-metadata in MCP _meta")
-
-    thread_id = turn_metadata.get("thread_id")
-    turn_id = turn_metadata.get("turn_id")
+            raise ValueError("x-codex-turn-metadata is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("missing x-codex-turn-metadata in MCP _meta")
+    thread_id = value.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id:
-        raise AuditCovError("missing thread_id in x-codex-turn-metadata")
-    if turn_id is not None and not isinstance(turn_id, str):
-        turn_id = None
-    session_id = turn_metadata.get("session_id")
-    if session_id is not None and not isinstance(session_id, str):
-        session_id = None
-    return TaskContext(thread_id=thread_id, turn_id=turn_id, session_id=session_id)
+        raise ValueError("missing thread_id in x-codex-turn-metadata")
+    turn_id = value.get("turn_id")
+    return CodexContext(thread_id, turn_id if isinstance(turn_id, str) else None)
 
 
 def tool_result(result: JSON) -> JSON:
-    text = json.dumps(result, ensure_ascii=False, indent=2)
     return {
-        "content": [{"type": "text", "text": text}],
+        "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=2)}],
         "structuredContent": result,
         "isError": False,
     }
@@ -232,7 +187,7 @@ def ok(request_id: Any, result: JSON) -> JSON:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
-def jsonrpc_error(request_id: Any, code: int, message: str) -> JSON:
+def rpc_error(request_id: Any, code: int, message: str) -> JSON:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
@@ -242,21 +197,16 @@ def run_stdio(server: McpServer) -> None:
             continue
         try:
             request = json.loads(line)
-        except json.JSONDecodeError:
-            response = jsonrpc_error(None, -32700, "parse error")
-        else:
             response = server.handle(request)
+        except json.JSONDecodeError:
+            response = rpc_error(None, -32700, "parse error")
         if response is not None:
             sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
             sys.stdout.flush()
 
 
 def main() -> None:
-    store = AuditCovStore(default_db_path())
-    try:
-        run_stdio(McpServer(store))
-    finally:
-        store.close()
+    run_stdio(McpServer())
 
 
 if __name__ == "__main__":

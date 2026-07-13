@@ -2,152 +2,127 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from auditcov_mcp.store import AuditCovError, AuditCovStore, TaskContext
+from auditcov_mcp.store import AgentContext, AuditCovError, AuditCovStore
 
 
 class StoreTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name) / "repo"
-        self.root.mkdir()
-        self.store = AuditCovStore(Path(self.tmp.name) / "auditcov.sqlite3")
-        self.context = TaskContext(thread_id="thread-1", turn_id="turn-1")
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+        (self.repo / "README.md").write_text("not source\n", encoding="utf-8")
+        (self.repo / "node_modules").mkdir()
+        (self.repo / "node_modules" / "ignored.js").write_text("ignored\n", encoding="utf-8")
+        self.store = AuditCovStore(self.root / "auditcov.sqlite3")
+        self.project = self.store.create_project(str(self.repo), "Example")
 
     def tearDown(self) -> None:
         self.store.close()
-        self.tmp.cleanup()
+        self.temp.cleanup()
 
-    def write(self, rel_path: str, content: str) -> None:
-        path = self.root / rel_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+    def test_project_freezes_full_repository_source_snapshot(self) -> None:
+        self.assertEqual(self.project["name"], "Example")
+        self.assertEqual(self.project["total_files"], 1)
+        self.assertEqual(self.project["total_lines"], 4)
+        self.assertEqual(self.project["session_count"], 0)
 
-    def test_init_freezes_code_extension_snapshot(self) -> None:
-        self.write("src/a.c", "int main() {}\nreturn 0;\n")
-        self.write("src/notes.txt", "not code\n")
-        result = self.store.init_project(self.context, str(self.root), ["src"])
+    def test_overlapping_projects_are_rejected(self) -> None:
+        with self.assertRaisesRegex(AuditCovError, "must not overlap"):
+            self.store.create_project(str(self.repo / "src"))
 
-        self.assertEqual(result["file_count"], 1)
-        self.assertEqual(result["total_lines"], 2)
-        self.assertIn(".c", result["included_extensions"])
-
-    def test_reinit_same_thread_errors(self) -> None:
-        self.write("src/a.py", "print('hi')\n")
-        self.store.init_project(self.context, str(self.root), ["src"])
-
-        with self.assertRaisesRegex(AuditCovError, "already initialized"):
-            self.store.init_project(self.context, str(self.root), ["src"])
-
-        with self.assertRaisesRegex(AuditCovError, "start a new thread"):
-            self.store.init_project(self.context, str(self.root / "missing"), ["nope"])
-
-    def test_reinit_changed_snapshot_errors(self) -> None:
-        self.write("src/a.py", "print('hi')\n")
-        self.store.init_project(self.context, str(self.root), ["src"])
-        self.write("src/a.py", "print('changed')\n")
-
-        with self.assertRaises(AuditCovError):
-            self.store.init_project(self.context, str(self.root), ["src"])
-
-    def test_read_file_records_merged_line_ranges(self) -> None:
-        self.write("src/a.py", "one\ntwo\nthree\nfour\n")
-        self.store.init_project(self.context, str(self.root), ["src"])
-
-        self.store.read_file(self.context, "src/a.py", 1, 2)
-        self.store.read_file(self.context, "src/a.py", 3, 3)
-        detail = self.store.get_file_detail(self.context, "src/a.py")
-        coverage = self.store.get_coverage(self.context)
-
-        self.assertEqual(detail["covered_ranges"], ["1-3"])
-        self.assertEqual(detail["uncovered_ranges"], ["4"])
-        self.assertEqual(coverage["covered_lines"], 3)
-        self.assertEqual(coverage["total_lines"], 4)
-        self.assertEqual(coverage["percent"], 75.0)
-
-    def test_list_projects_and_tree_include_coverage(self) -> None:
-        self.write("src/a.py", "one\ntwo\n")
-        self.write("src/nested/b.py", "three\nfour\n")
-        self.store.init_project(self.context, str(self.root), ["src"])
-        self.store.read_file(self.context, "src/a.py", 1, 1)
-        self.store.read_file(self.context, "src/nested/b.py", 1, 2)
-
-        projects = self.store.list_projects()
-        tree = self.store.get_project_tree("thread-1")["tree"]
-
-        self.assertEqual(len(projects["projects"]), 1)
-        self.assertEqual(projects["projects"][0]["covered_lines"], 3)
-        self.assertEqual(projects["projects"][0]["total_lines"], 4)
-        self.assertEqual(tree["covered_lines"], 3)
-        self.assertEqual(tree["total_lines"], 4)
-        self.assertEqual(tree["children"][0]["name"], "src")
-        self.assertEqual(tree["children"][0]["percent"], 75.0)
-
-    def test_project_root_aggregates_selected_threads(self) -> None:
-        self.write("src/a.py", "one\ntwo\nthree\n")
-        self.write("lib/b.py", "four\nfive\n")
-        thread_2 = TaskContext(thread_id="thread-2", turn_id="turn-2")
-
-        self.store.init_project(self.context, str(self.root), ["src"])
-        self.store.init_project(thread_2, str(self.root), ["src", "lib"])
-        self.store.read_file(self.context, "src/a.py", 1, 1)
-        self.store.read_file(thread_2, "src/a.py", 2, 3)
-        self.store.read_file(thread_2, "lib/b.py", 1, 1)
-
-        projects = self.store.list_projects()["projects"]
-        root_detail = self.store.get_project_root_threads(str(self.root))
-        selected_one = self.store.get_project_root_tree(str(self.root), ["thread-1"])
-        selected_both = self.store.get_project_root_tree(
-            str(self.root), ["thread-1", "thread-2"]
+    def test_unconfigured_and_non_source_reads_are_transparent(self) -> None:
+        context = AgentContext("claude-code", "session-1")
+        outside = self.root / "outside.py"
+        outside.write_text("outside\n", encoding="utf-8")
+        self.assertFalse(self.store.prepare_read(context, "call-1", str(outside))["tracked"])
+        self.assertFalse(
+            self.store.prepare_read(context, "call-2", str(self.repo / "README.md"))["tracked"]
         )
-        file_view = self.store.get_project_root_file_view(
-            str(self.root), ["thread-1", "thread-2"], "src/a.py"
-        )
+        self.assertEqual(self.store.get_project(self.project["id"])["session_count"], 0)
 
-        self.assertEqual(len(projects), 1)
-        self.assertEqual(projects[0]["thread_count"], 2)
-        self.assertEqual(projects[0]["covered_lines"], 4)
-        self.assertEqual(projects[0]["total_lines"], 5)
-        self.assertEqual(projects[0]["percent"], 80.0)
-        self.assertEqual(len(root_detail["threads"]), 2)
-        self.assertEqual(selected_one["covered_lines"], 1)
-        self.assertEqual(selected_one["total_lines"], 3)
-        self.assertEqual(selected_both["covered_lines"], 4)
-        self.assertEqual(selected_both["total_lines"], 5)
-        self.assertEqual(file_view["covered_ranges"], ["1-3"])
+    def test_before_does_not_count_and_successful_after_counts(self) -> None:
+        context = AgentContext("claude-code", "session-1")
+        path = str(self.repo / "src" / "a.py")
+        before = self.store.prepare_read(context, "call-1", path, 2, 3)
+        self.assertTrue(before["tracked"])
+        self.assertEqual(self.store.get_project(self.project["id"])["covered_lines"], 0)
+        after = self.store.complete_read(context, "call-1", path, True)
+        self.assertTrue(after["counted"])
+        self.assertEqual(self.store.get_project(self.project["id"])["covered_lines"], 2)
 
-    def test_get_file_view_marks_lines(self) -> None:
-        self.write("src/a.py", "one\ntwo\nthree\n")
-        self.store.init_project(self.context, str(self.root), ["src"])
-        self.store.read_file(self.context, "src/a.py", 2, 3)
+    def test_failed_after_does_not_count(self) -> None:
+        context = AgentContext("opencode", "session-2")
+        path = str(self.repo / "src" / "a.py")
+        self.store.prepare_read(context, "call-2", path, 1, 4)
+        result = self.store.complete_read(context, "call-2", path, False)
+        self.assertFalse(result["counted"])
+        self.assertEqual(self.store.get_project(self.project["id"])["covered_lines"], 0)
 
-        view = self.store.get_file_view("thread-1", "src/a.py")
+    def test_sessions_aggregate_by_union(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        first = AgentContext("claude-code", "cc-session")
+        second = AgentContext("opencode", "oc-session")
+        self.store.prepare_read(first, "cc-call", path, 1, 2)
+        self.store.complete_read(first, "cc-call", path, True)
+        self.store.prepare_read(second, "oc-call", path, 2, 4)
+        self.store.complete_read(second, "oc-call", path, True)
+        detail = self.store.get_project(self.project["id"])
+        self.assertEqual(detail["session_count"], 2)
+        self.assertEqual(detail["covered_lines"], 4)
+        first_id = next(item["id"] for item in detail["sessions"] if item["agent_type"] == "claude-code")
+        selected = self.store.get_project_tree(self.project["id"], [first_id])
+        self.assertEqual(selected["covered_lines"], 2)
 
-        self.assertEqual(view["covered_ranges"], ["2-3"])
-        self.assertFalse(view["lines"][0]["covered"])
-        self.assertTrue(view["lines"][1]["covered"])
-        self.assertTrue(view["lines"][2]["covered"])
+    def test_parallel_completions_merge_without_losing_ranges(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        context = AgentContext("opencode", "parallel-session")
+        self.store.prepare_read(context, "call-1", path, 1, 2)
+        self.store.prepare_read(context, "call-2", path, 3, 4)
 
-    def test_read_file_truncates_on_complete_line_boundary(self) -> None:
-        line = "x" * 1000 + "\n"
-        self.write("src/large.py", line * 100)
-        self.store.init_project(self.context, str(self.root), ["src"])
+        def complete(call_id: str) -> None:
+            worker = AuditCovStore(self.root / "auditcov.sqlite3")
+            try:
+                worker.complete_read(context, call_id, path, True)
+            finally:
+                worker.close()
 
-        result = self.store.read_file(self.context, "src/large.py", 1, 100)
-        detail = self.store.get_file_detail(self.context, "src/large.py")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(complete, ["call-1", "call-2"]))
+        detail = self.store.get_project(self.project["id"])
+        self.assertEqual(detail["covered_lines"], 4)
 
-        self.assertTrue(result["truncated"])
-        self.assertLess(result["end_line"], 100)
-        self.assertEqual(result["next_start_line"], result["end_line"] + 1)
-        self.assertEqual(detail["covered_ranges"], [f"1-{result['end_line']}"])
+    def test_codex_read_returns_content_and_server_owns_coverage(self) -> None:
+        context = AgentContext("codex", "thread-1", "turn-1")
+        result = self.store.codex_read(context, "src/a.py", 2, 3)
+        self.assertIn("2 | two", result["content"])
+        coverage = self.store.get_agent_coverage(context)
+        self.assertEqual(coverage["covered_lines"], 2)
+        file_detail = self.store.get_agent_file_detail(context, "src/a.py")
+        self.assertEqual(file_detail["covered_ranges"], ["2-3"])
 
-    def test_path_escape_is_rejected(self) -> None:
-        self.write("src/a.py", "print('hi')\n")
-        self.store.init_project(self.context, str(self.root), ["src"])
-
-        with self.assertRaises(AuditCovError):
-            self.store.read_file(self.context, "../outside.py", 1, 1)
+    def test_hook_range_is_reduced_at_complete_line_boundary(self) -> None:
+        large = self.repo / "src" / "large.py"
+        large.write_text("x" * 30_000 + "\n" + "y" * 30_000 + "\n", encoding="utf-8")
+        other = self.root / "other"
+        other.mkdir()
+        # A fresh project snapshot is required to include the new file.
+        store = AuditCovStore(self.root / "second.sqlite3")
+        try:
+            project = store.create_project(str(self.repo))
+            result = store.prepare_read(
+                AgentContext("opencode", "session"), "call", str(large), 1, 2
+            )
+            self.assertTrue(result["modified"])
+            self.assertEqual(result["end_line"], 1)
+            self.assertEqual(project["total_files"], 2)
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

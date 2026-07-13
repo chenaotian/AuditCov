@@ -19,6 +19,15 @@
         <div class="sidebar-actions">
           <button id="refreshButton" class="command-button" type="button">Refresh</button>
         </div>
+        <form id="projectForm" class="settings-panel">
+          <div class="settings-title">Create project</div>
+          <label class="settings-label" for="projectRootInput">Repository root</label>
+          <input id="projectRootInput" class="path-input" type="text" autocomplete="off" spellcheck="false" placeholder="/path/to/repository">
+          <label class="settings-label" for="projectNameInput">Name (optional)</label>
+          <input id="projectNameInput" class="path-input" type="text" autocomplete="off" spellcheck="false">
+          <button id="projectCreateButton" class="command-button" type="submit">Create project</button>
+          <div id="projectMessage" class="settings-message"></div>
+        </form>
         <form id="workdirForm" class="settings-panel">
           <div class="settings-title">Workspace</div>
           <label class="settings-label" for="workdirInput">Work directory</label>
@@ -43,10 +52,10 @@
           <div class="left-column">
             <section class="coverage-card">
               <section id="metricGrid" class="metric-grid"></section>
-              <section id="threadSelector" class="thread-selector empty-state">Select a project root to choose sessions.</section>
+              <section id="threadSelector" class="thread-selector empty-state">Select a project to choose agent sessions.</section>
             </section>
             <div class="tree-panel">
-              <div class="panel-title">Targets</div>
+              <div class="panel-title">Project snapshot</div>
               <div id="treeView" class="tree-view empty-state">No initialized projects found.</div>
             </div>
           </div>

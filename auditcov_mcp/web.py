@@ -5,13 +5,14 @@ import json
 import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from auditcov_mcp import __version__
 from auditcov_mcp.paths import WorkDirError, change_work_dir, workdir_settings
-from auditcov_mcp.store import AuditCovError, AuditCovStore, default_db_path
+from auditcov_mcp.store import AgentContext, AuditCovError, AuditCovStore, default_db_path
 
 STATIC_DIR = Path(__file__).parent / "web_static"
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
 class AuditCovWebServer(ThreadingHTTPServer):
@@ -20,9 +21,11 @@ class AuditCovWebServer(ThreadingHTTPServer):
         self.explicit_db_path = db_path
 
     def db_path(self) -> Path:
-        if self.explicit_db_path is not None:
-            return self.explicit_db_path.expanduser().resolve()
-        return default_db_path()
+        return (
+            self.explicit_db_path.expanduser().resolve()
+            if self.explicit_db_path is not None
+            else default_db_path()
+        )
 
 
 class AuditCovWebHandler(BaseHTTPRequestHandler):
@@ -32,60 +35,104 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/":
-                self._serve_static("index.html")
-                return
+                return self._serve_static("index.html")
             if parsed.path.startswith("/static/"):
-                self._serve_static(parsed.path.removeprefix("/static/"))
-                return
+                return self._serve_static(parsed.path.removeprefix("/static/"))
             if parsed.path == "/api/health":
-                self._send_json({"ok": True, "version": __version__})
-                return
+                return self._send_json({"ok": True, "version": __version__})
             if parsed.path == "/api/settings":
-                self._send_json(workdir_settings(explicit_db_path=self.server.explicit_db_path))
-                return
-            if parsed.path == "/api/projects":
-                self._with_store(lambda store: store.list_projects())
-                return
-            if parsed.path == "/api/projects/root":
-                params = parse_qs(parsed.query)
-                project_root = params.get("project_root", [None])[0]
-                if not project_root:
-                    self._send_json({"error": "missing project_root"}, status=400)
-                    return
-                self._with_store(lambda store: store.get_project_root_threads(project_root))
-                return
-            if parsed.path == "/api/projects/coverage":
-                params = parse_qs(parsed.query)
-                project_root = params.get("project_root", [None])[0]
-                thread_ids = params.get("thread_id", [])
-                if not project_root:
-                    self._send_json({"error": "missing project_root"}, status=400)
-                    return
-                self._with_store(
-                    lambda store: store.get_project_root_tree(project_root, thread_ids)
+                return self._send_json(
+                    workdir_settings(explicit_db_path=self.server.explicit_db_path)
                 )
-                return
-            if parsed.path == "/api/projects/file":
+            if parsed.path == "/api/projects":
+                return self._with_store(lambda store: store.list_projects())
+            if parsed.path == "/api/agent/coverage":
                 params = parse_qs(parsed.query)
-                project_root = params.get("project_root", [None])[0]
-                thread_ids = params.get("thread_id", [])
-                file_path = params.get("path", [None])[0]
-                if not project_root:
-                    self._send_json({"error": "missing project_root"}, status=400)
-                    return
-                if not file_path:
-                    self._send_json({"error": "missing file path"}, status=400)
-                    return
-                self._with_store(
-                    lambda store: store.get_project_root_file_view(
-                        project_root, thread_ids, file_path
+                context = context_from_query(params)
+                project_id = optional_query_int(params, "project_id")
+                path = params.get("path", [None])[0]
+                return self._with_store(
+                    lambda store: store.get_agent_coverage(context, path, project_id)
+                )
+            if parsed.path == "/api/agent/file-detail":
+                params = parse_qs(parsed.query)
+                context = context_from_query(params)
+                project_id = optional_query_int(params, "project_id")
+                path = params.get("path", [None])[0]
+                if not path:
+                    raise AuditCovError("missing path")
+                return self._with_store(
+                    lambda store: store.get_agent_file_detail(context, path, project_id)
+                )
+            if parsed.path.startswith("/api/projects/"):
+                return self._handle_project_get(parsed.path, parsed.query)
+            self._send_json({"error": "not found"}, status=404)
+        except AuditCovError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except WorkDirError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+        except (OSError, ValueError) as exc:
+            self._send_json({"error": str(exc)}, status=500)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            payload = self._read_json_body()
+            if parsed.path == "/api/settings/workdir":
+                work_dir = payload.get("work_dir")
+                if not isinstance(work_dir, str) or not work_dir.strip():
+                    raise AuditCovError("work_dir must be a non-empty string")
+                if self.server.explicit_db_path is not None:
+                    raise WorkDirError("cannot change work directory when server uses --db")
+                return self._send_json(change_work_dir(work_dir))
+            if parsed.path == "/api/projects":
+                project_root = required_string(payload, "project_root")
+                name = payload.get("name")
+                if name is not None and not isinstance(name, str):
+                    raise AuditCovError("name must be a string")
+                return self._with_store(
+                    lambda store: store.create_project(project_root, name), status=201
+                )
+            if parsed.path == "/api/read/before":
+                context = context_from_payload(payload)
+                return self._with_store(
+                    lambda store: store.prepare_read(
+                        context,
+                        required_string(payload, "call_id"),
+                        required_string(payload, "file_path"),
+                        optional_int(payload, "start_line"),
+                        optional_int(payload, "end_line"),
                     )
                 )
-                return
-            if parsed.path.startswith("/api/projects/"):
-                self._handle_project_api(parsed.path, parsed.query)
-                return
+            if parsed.path == "/api/read/after":
+                context = context_from_payload(payload)
+                success = payload.get("success")
+                if not isinstance(success, bool):
+                    raise AuditCovError("success must be a boolean")
+                return self._with_store(
+                    lambda store: store.complete_read(
+                        context,
+                        required_string(payload, "call_id"),
+                        required_string(payload, "file_path"),
+                        success,
+                        optional_int(payload, "start_line"),
+                        optional_int(payload, "end_line"),
+                    )
+                )
+            if parsed.path == "/api/codex/read":
+                context = context_from_payload(payload, required_agent="codex")
+                return self._with_store(
+                    lambda store: store.codex_read(
+                        context,
+                        required_string(payload, "path"),
+                        optional_int(payload, "start_line"),
+                        optional_int(payload, "end_line"),
+                        payload.get("call_id") if isinstance(payload.get("call_id"), str) else None,
+                    )
+                )
             self._send_json({"error": "not found"}, status=404)
+        except json.JSONDecodeError:
+            self._send_json({"error": "request body must be valid JSON"}, status=400)
         except AuditCovError as exc:
             self._send_json({"error": str(exc)}, status=400)
         except WorkDirError as exc:
@@ -93,62 +140,45 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._send_json({"error": str(exc)}, status=500)
 
-    def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        try:
-            if parsed.path == "/api/settings/workdir":
-                payload = self._read_json_body()
-                work_dir = payload.get("work_dir")
-                if not isinstance(work_dir, str) or not work_dir.strip():
-                    self._send_json({"error": "work_dir must be a non-empty string"}, status=400)
-                    return
-                if self.server.explicit_db_path is not None:
-                    raise WorkDirError("cannot change work directory when web viewer uses --db")
-                self._send_json(change_work_dir(work_dir))
-                return
-            self._send_json({"error": "not found"}, status=404)
-        except json.JSONDecodeError:
-            self._send_json({"error": "request body must be valid JSON"}, status=400)
-        except WorkDirError as exc:
-            self._send_json({"error": str(exc)}, status=409)
-        except OSError as exc:
-            self._send_json({"error": str(exc)}, status=500)
-
-    def log_message(self, format: str, *args: object) -> None:
-        return
-
-    def _handle_project_api(self, path: str, query: str) -> None:
-        suffix = path.removeprefix("/api/projects/")
-        if suffix.endswith("/file"):
-            thread_id = unquote(suffix.removesuffix("/file"))
-            params = parse_qs(query)
+    def _handle_project_get(self, path: str, query: str) -> None:
+        parts = path.removeprefix("/api/projects/").strip("/").split("/")
+        if not parts or not parts[0].isdigit():
+            raise AuditCovError("invalid project id")
+        project_id = int(parts[0])
+        params = parse_qs(query)
+        if len(parts) == 1:
+            return self._with_store(lambda store: store.get_project(project_id))
+        selection = selected_session_ids(params)
+        if parts[1] == "coverage":
+            return self._with_store(
+                lambda store: store.get_project_tree(project_id, selection)
+            )
+        if parts[1] == "file":
             file_path = params.get("path", [None])[0]
             if not file_path:
-                self._send_json({"error": "missing file path"}, status=400)
-                return
-            self._with_store(lambda store: store.get_file_view(thread_id, file_path))
-            return
+                raise AuditCovError("missing file path")
+            return self._with_store(
+                lambda store: store.get_project_file_view(project_id, selection, file_path)
+            )
+        self._send_json({"error": "not found"}, status=404)
 
-        thread_id = unquote(suffix)
-        self._with_store(lambda store: store.get_project_tree(thread_id))
-
-    def _with_store(self, callback):
+    def _with_store(self, callback, status: int = 200) -> None:
         store = AuditCovStore(self.server.db_path())
         try:
-            self._send_json(callback(store))
+            self._send_json(callback(store), status=status)
         finally:
             store.close()
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 65536:
-            raise WorkDirError("request body is too large")
+        if length > MAX_REQUEST_BYTES:
+            raise AuditCovError("request body is too large")
         raw = self.rfile.read(length)
         if not raw:
             return {}
         payload = json.loads(raw.decode("utf-8"))
         if not isinstance(payload, dict):
-            raise WorkDirError("request body must be a JSON object")
+            raise AuditCovError("request body must be a JSON object")
         return payload
 
     def _send_json(self, payload: dict, status: int = 200) -> None:
@@ -168,9 +198,7 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             raise AuditCovError("invalid static path") from exc
         if not path.is_file():
-            self._send_json({"error": "static asset not found"}, status=404)
-            return
-
+            return self._send_json({"error": "static asset not found"}, status=404)
         body = path.read_bytes()
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         self.send_response(200)
@@ -180,18 +208,78 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def required_string(payload: dict, name: str) -> str:
+    value = payload.get(name)
+    if not isinstance(value, str) or not value:
+        raise AuditCovError(f"{name} must be a non-empty string")
+    return value
+
+
+def optional_int(payload: dict, name: str) -> int | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AuditCovError(f"{name} must be an integer or null")
+    return value
+
+
+def context_from_payload(payload: dict, required_agent: str | None = None) -> AgentContext:
+    agent_type = required_string(payload, "agent_type")
+    if required_agent is not None and agent_type != required_agent:
+        raise AuditCovError(f"agent_type must be {required_agent}")
+    return AgentContext(
+        agent_type=agent_type,
+        agent_session_id=required_string(payload, "agent_session_id"),
+        turn_id=payload.get("turn_id") if isinstance(payload.get("turn_id"), str) else None,
+    )
+
+
+def context_from_query(params: dict[str, list[str]]) -> AgentContext:
+    agent_type = params.get("agent_type", [""])[0]
+    session_id = params.get("agent_session_id", [""])[0]
+    return AgentContext(agent_type=agent_type, agent_session_id=session_id)
+
+
+def optional_query_int(params: dict[str, list[str]], name: str) -> int | None:
+    value = params.get(name, [None])[0]
+    if value is None:
+        return None
+    if not value.isdigit():
+        raise AuditCovError(f"{name} must be a positive integer")
+    return int(value)
+
+
+def selected_session_ids(params: dict[str, list[str]]) -> list[int] | None:
+    if params.get("selection", [None])[0] == "none":
+        return []
+    values = params.get("session_id")
+    if values is None:
+        return None
+    selected = []
+    for value in values:
+        if not value.isdigit():
+            raise AuditCovError("session_id must be a positive integer")
+        selected.append(int(value))
+    return selected
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the AuditCov web coverage viewer.")
+    parser = argparse.ArgumentParser(
+        description="Run the central AuditCov coverage server and web viewer."
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--db", type=Path, default=None)
-    parser.add_argument("--quiet", action="store_true", help="Do not print the startup URL.")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
-
-    server = AuditCovWebServer((args.host, args.port), args.db.expanduser() if args.db else None)
+    server = AuditCovWebServer((args.host, args.port), args.db)
     if not args.quiet:
-        print(f"AuditCov web viewer: http://{args.host}:{args.port}", flush=True)
+        print(f"AuditCov server: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -28,7 +28,7 @@ class PathsTests(unittest.TestCase):
 
     def test_default_db_path_uses_install_work_dir(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(default_db_path(self.root), default_work_dir(self.root) / DB_FILENAME)
+            self.assertEqual(default_db_path(self.root), (default_work_dir(self.root) / DB_FILENAME).resolve())
 
     def test_change_work_dir_moves_existing_content(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -42,8 +42,8 @@ class PathsTests(unittest.TestCase):
             self.assertTrue(result["moved"])
             self.assertFalse(source.exists())
             self.assertEqual((target / DB_FILENAME).read_text(encoding="utf-8"), "db")
-            self.assertEqual(json.loads(config_path(self.root).read_text())["work_dir"], str(target))
-            self.assertEqual(default_db_path(self.root), target / DB_FILENAME)
+            self.assertEqual(json.loads(config_path(self.root).read_text())["work_dir"], str(target.resolve()))
+            self.assertEqual(default_db_path(self.root), (target / DB_FILENAME).resolve())
 
     def test_change_work_dir_rejects_non_empty_target(self) -> None:
         with patch.dict("os.environ", {}, clear=True):

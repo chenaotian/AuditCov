@@ -3,7 +3,7 @@ name = "auditcov"
 version = "0.2.0"
 description = "Cross-agent objective source-read coverage tracker for code audits."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]

@@ -165,9 +165,10 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
     def _with_store(self, callback, status: int = 200) -> None:
         store = AuditCovStore(self.server.db_path())
         try:
-            self._send_json(callback(store), status=status)
+            payload = callback(store)
         finally:
             store.close()
+        self._send_json(payload, status=status)
 
     def _read_json_body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))

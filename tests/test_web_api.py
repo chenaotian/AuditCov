@@ -5,9 +5,11 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
-from auditcov_mcp.web import AuditCovWebServer
+from auditcov_mcp.web import AuditCovWebHandler, AuditCovWebServer
 
 
 class WebApiTests(unittest.TestCase):
@@ -79,6 +81,40 @@ class WebApiTests(unittest.TestCase):
             },
         )
         self.assertFalse(result["tracked"])
+
+    def test_store_is_closed_before_response_is_sent(self) -> None:
+        events = []
+
+        class FakeStore:
+            def __init__(self, _db_path) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+                events.append("closed")
+
+        handler = object.__new__(AuditCovWebHandler)
+        handler.server = SimpleNamespace(db_path=lambda: self.root / "unused.sqlite3")
+
+        def send_json(payload, status=200) -> None:
+            events.append(("sent", payload, status, store.closed))
+
+        handler._send_json = send_json
+        with patch("auditcov_mcp.web.AuditCovStore", FakeStore):
+            store = None
+
+            def callback(value):
+                nonlocal store
+                store = value
+                events.append(("callback", value.closed))
+                return {"ok": True}
+
+            handler._with_store(callback, status=201)
+
+        self.assertEqual(
+            events,
+            [("callback", False), "closed", ("sent", {"ok": True}, 201, True)],
+        )
 
 
 if __name__ == "__main__":

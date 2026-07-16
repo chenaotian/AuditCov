@@ -81,6 +81,38 @@ class StoreTests(unittest.TestCase):
         selected = self.store.get_project_tree(self.project["id"], [first_id])
         self.assertEqual(selected["covered_lines"], 2)
 
+    def test_project_coverage_batches_range_queries_for_large_snapshots(self) -> None:
+        with self.store.conn:
+            self.store.conn.executemany(
+                """
+                INSERT INTO ac_files(project_id, path, line_count, content_sha256)
+                VALUES (?, ?, 1, ?)
+                """,
+                [
+                    (self.project["id"], f"src/generated-{index}.py", "0" * 64)
+                    for index in range(100)
+                ],
+            )
+        context = AgentContext("codex", "batched-thread")
+        self.store.codex_read(context, "src/a.py", 1, 1, call_id="batched-read")
+
+        statements = []
+        self.store.conn.set_trace_callback(statements.append)
+        try:
+            summary = self.store.list_projects()
+            tree = self.store.get_project_tree(self.project["id"])
+        finally:
+            self.store.conn.set_trace_callback(None)
+
+        range_queries = [
+            statement
+            for statement in statements
+            if "FROM ac_covered_ranges AS ranges" in statement
+        ]
+        self.assertEqual(len(range_queries), 2)
+        self.assertEqual(summary["projects"][0]["covered_lines"], 1)
+        self.assertEqual(tree["covered_lines"], 1)
+
     def test_parent_and_child_sessions_have_independent_coverage(self) -> None:
         path = str(self.repo / "src" / "a.py")
         child = AgentContext(

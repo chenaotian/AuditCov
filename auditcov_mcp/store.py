@@ -432,11 +432,12 @@ class AuditCovStore:
     ) -> dict[str, Any]:
         project = self._require_project(project_id)
         selected = self._validated_session_ids(project_id, session_ids)
+        ranges_by_path = self._aggregate_ranges_by_path(project_id, selected)
         files = []
         for row in self.conn.execute(
             "SELECT * FROM ac_files WHERE project_id = ? ORDER BY path", (project_id,)
         ):
-            ranges = self._aggregate_ranges(selected, str(row["path"]))
+            ranges = ranges_by_path.get(str(row["path"]), [])
             total = int(row["line_count"])
             covered = range_size(ranges)
             files.append(file_coverage(str(row["path"]), total, covered))
@@ -928,13 +929,43 @@ class AuditCovStore:
                 row for row in file_rows
                 if row["path"] == prefix or str(row["path"]).startswith(prefix + "/")
             ]
-        files = []
-        for row in file_rows:
-            ranges = self._aggregate_ranges(session_ids, str(row["path"]))
-            files.append(
-                file_coverage(str(row["path"]), int(row["line_count"]), range_size(ranges))
+        ranges_by_path = self._aggregate_ranges_by_path(project_id, session_ids)
+        total_lines = sum(int(row["line_count"]) for row in file_rows)
+        covered_by_file = [
+            range_size(ranges_by_path.get(str(row["path"]), [])) for row in file_rows
+        ]
+        covered_lines = sum(covered_by_file)
+        return {
+            "covered_lines": covered_lines,
+            "total_lines": total_lines,
+            "percent": percent(covered_lines, total_lines),
+            "covered_files": sum(1 for covered in covered_by_file if covered),
+            "total_files": len(file_rows),
+        }
+
+    def _aggregate_ranges_by_path(
+        self, project_id: int, session_ids: list[int]
+    ) -> dict[str, list[tuple[int, int]]]:
+        if not session_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in session_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT ranges.path, ranges.start_line, ranges.end_line
+            FROM ac_covered_ranges AS ranges
+            JOIN ac_files AS files
+              ON files.project_id = ? AND files.path = ranges.path
+            WHERE ranges.session_id IN ({placeholders})
+            ORDER BY ranges.path, ranges.start_line, ranges.end_line
+            """,
+            [project_id, *session_ids],
+        )
+        grouped: dict[str, list[tuple[int, int]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["path"]), []).append(
+                (int(row["start_line"]), int(row["end_line"]))
             )
-        return coverage_from_files(files)
+        return {path: merge_ranges(ranges) for path, ranges in grouped.items()}
 
     def _aggregate_ranges(self, session_ids: list[int], path: str) -> list[tuple[int, int]]:
         if not session_ids:

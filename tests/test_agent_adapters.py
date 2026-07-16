@@ -153,6 +153,47 @@ class InstallerTests(unittest.TestCase):
                 self.assertNotIn(self.installer.CLAUDE_MARKER, json.dumps(removed))
                 self.assertFalse(installed_hook.exists())
 
+    def test_codex_install_uses_current_python_in_runtime_marketplace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime_root = Path(temp) / "codex-marketplace"
+            calls = []
+
+            def record(*args: str, check: bool = True) -> bool:
+                calls.append((args, check))
+                return True
+
+            with patch.object(
+                self.installer, "codex_runtime_marketplace", return_value=runtime_root
+            ), patch.object(self.installer, "run_codex", side_effect=record):
+                self.installer.install_codex()
+
+            config = json.loads(
+                (runtime_root / "plugins" / "auditcov" / ".mcp.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                config["mcpServers"]["auditcov"]["command"],
+                str(Path(self.installer.sys.executable).resolve()),
+            )
+            self.assertTrue(
+                (
+                    runtime_root
+                    / "plugins"
+                    / "auditcov"
+                    / "auditcov_mcp"
+                    / "server.py"
+                ).is_file()
+            )
+            self.assertEqual(
+                calls,
+                [
+                    (("plugin", "marketplace", "remove", "auditcov-local"), False),
+                    (("plugin", "marketplace", "add", str(runtime_root)), True),
+                    (("plugin", "add", "auditcov@auditcov-local"), True),
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

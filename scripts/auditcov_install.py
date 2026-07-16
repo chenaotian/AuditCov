@@ -16,6 +16,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_MARKER = "AuditCov Read tracking"
 OPENCODE_FILENAME = "auditcov_plugin.ts"
+CODEX_MARKETPLACE_NAME = "auditcov-local"
 
 
 def data_home() -> Path:
@@ -38,6 +39,10 @@ def claude_installed_hook() -> Path:
 
 def opencode_installed_plugin() -> Path:
     return config_home() / "opencode" / "plugins" / OPENCODE_FILENAME
+
+
+def codex_runtime_marketplace() -> Path:
+    return data_home() / "auditcov" / "codex-marketplace"
 
 
 def load_json_object(path: Path) -> dict[str, Any]:
@@ -159,24 +164,66 @@ def uninstall_opencode() -> None:
         print(f"removed OpenCode plugin: {target}")
 
 
-def run_codex(*args: str) -> None:
+def run_codex(*args: str, check: bool = True) -> bool:
     executable = shutil.which("codex")
     if not executable:
         raise RuntimeError("codex executable was not found on PATH")
-    subprocess.run([executable, *args], check=True)
+    result = subprocess.run(
+        [executable, *args],
+        check=False,
+        stdout=None if check else subprocess.DEVNULL,
+        stderr=None if check else subprocess.DEVNULL,
+    )
+    if check and result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, [executable, *args])
+    return result.returncode == 0
+
+
+def prepare_codex_marketplace() -> Path:
+    source_plugin = ROOT / "plugins" / "auditcov"
+    source_marketplace = ROOT / ".agents" / "plugins" / "marketplace.json"
+    if not source_plugin.is_dir():
+        raise RuntimeError(f"AuditCov plugin is missing: {source_plugin}")
+    if not source_marketplace.is_file():
+        raise RuntimeError(f"AuditCov marketplace is missing: {source_marketplace}")
+
+    runtime_root = codex_runtime_marketplace()
+    runtime_plugin = runtime_root / "plugins" / "auditcov"
+    shutil.copytree(
+        source_plugin,
+        runtime_plugin,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    runtime_marketplace = runtime_root / ".agents" / "plugins" / "marketplace.json"
+    runtime_marketplace.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_marketplace, runtime_marketplace)
+
+    mcp_path = runtime_plugin / ".mcp.json"
+    mcp_config = load_json_object(mcp_path)
+    servers = mcp_config.get("mcpServers")
+    auditcov = servers.get("auditcov") if isinstance(servers, dict) else None
+    if not isinstance(auditcov, dict):
+        raise RuntimeError(f"AuditCov MCP configuration is invalid: {mcp_path}")
+    auditcov["command"] = str(Path(sys.executable).resolve())
+    write_json(mcp_path, mcp_config)
+    return runtime_root
 
 
 def install_codex() -> None:
-    marketplace = ROOT / ".agents" / "plugins" / "marketplace.json"
-    if not marketplace.is_file():
-        raise RuntimeError(f"AuditCov marketplace is missing: {marketplace}")
-    run_codex("plugin", "marketplace", "add", str(ROOT))
-    run_codex("plugin", "add", "auditcov@auditcov-local")
-    print("installed Codex plugin: auditcov@auditcov-local")
+    marketplace_root = prepare_codex_marketplace()
+    run_codex("plugin", "marketplace", "remove", CODEX_MARKETPLACE_NAME, check=False)
+    run_codex("plugin", "marketplace", "add", str(marketplace_root))
+    run_codex("plugin", "add", f"auditcov@{CODEX_MARKETPLACE_NAME}")
+    print(
+        f"installed Codex plugin: auditcov@{CODEX_MARKETPLACE_NAME} "
+        f"using {Path(sys.executable).resolve()}"
+    )
 
 
 def uninstall_codex() -> None:
     run_codex("plugin", "remove", "auditcov")
+    run_codex("plugin", "marketplace", "remove", CODEX_MARKETPLACE_NAME, check=False)
     print("removed Codex plugin: auditcov")
 
 

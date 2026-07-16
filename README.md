@@ -144,6 +144,10 @@ python scripts/auditcov_install.py install --claude
 python scripts/auditcov_install.py install --opencode
 ```
 
+安装 Codex 时，安装器会创建一份当前用户专用的运行时 marketplace 副本，并将执行安装器的
+Python 解释器绝对路径写入 MCP 配置。Linux/WSL 使用 `python3` 运行安装器，Windows 使用
+`python`；Codex MCP 不再假定两个平台都存在同名的 `python` 命令。
+
 同时安装多个工具：
 
 ```bash

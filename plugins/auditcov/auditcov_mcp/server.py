@@ -82,10 +82,12 @@ def tool_definitions() -> list[dict[str, Any]]:
     return [
         {
             "name": "auditcov_read_file",
-            "title": "Read Tracked Project File",
+            "title": "Read Configured Project File",
             "description": (
-                "Read complete source lines through the central AuditCov server and record "
-                "them for the current Codex thread. When the user requests AuditCov, prefer "
+                "Read complete lines from any regular file inside a configured project and "
+                "record the read for the current Codex thread. Only files in the project's "
+                "frozen source snapshot count toward coverage; other project files are still "
+                "returned and audited. When the user requests AuditCov, prefer "
                 "this tool for direct source-code reads and do not bypass it with shell or "
                 "other system commands unless AuditCov is unavailable or fails. The project "
                 "must first be created in the Web UI."

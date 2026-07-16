@@ -321,13 +321,22 @@ class AuditCovStore:
         end_line: int | None = None,
         call_id: str | None = None,
     ) -> dict[str, Any]:
+        validate_context(context)
         if context.agent_type != "codex":
             raise AuditCovError("codex_read requires agent_type=codex")
-        match = self._match_target_file(path)
+        match = self._match_project_path(path)
         if match is None:
             raise AuditCovError("path is not part of any configured AuditCov project")
-        project, file_row, abs_path = match
-        total_lines = int(file_row["line_count"])
+        project, file_row, abs_path, rel_path = match
+        if not abs_path.is_file():
+            raise AuditCovError(f"path is not a readable project file: {path}")
+
+        snapshot_tracked = file_row is not None
+        observed_content_sha256 = None
+        if snapshot_tracked:
+            total_lines = int(file_row["line_count"])
+        else:
+            total_lines, observed_content_sha256 = file_stats(abs_path)
         requested_start = 1 if start_line is None else positive_int(start_line, "start_line")
         requested_end = total_lines if end_line is None else positive_int(end_line, "end_line")
         if requested_start > requested_end:
@@ -348,18 +357,29 @@ class AuditCovStore:
 
         actual_end = int(read_result["end_line"])
         event_id = call_id or f"codex-{uuid.uuid4()}"
-        self.prepare_read(context, event_id, str(abs_path), requested_start, requested_end)
-        self.complete_read(
-            context, event_id, str(abs_path), True, requested_start, actual_end
+        session_id, counted = self._record_codex_read(
+            context,
+            event_id,
+            int(project["id"]),
+            rel_path,
+            requested_start,
+            requested_end,
+            actual_end,
+            snapshot_tracked,
+            observed_content_sha256,
         )
         return {
             "project_id": int(project["id"]),
-            "path": file_row["path"],
+            "session_id": session_id,
+            "path": rel_path,
             "requested_start_line": requested_start,
             "requested_end_line": requested_end,
             "start_line": requested_start,
             "end_line": actual_end,
             "total_lines": total_lines,
+            "audit_recorded": True,
+            "snapshot_tracked": snapshot_tracked,
+            "counted": counted,
             "truncated": bool(read_result["truncated"]),
             "next_start_line": actual_end + 1 if read_result["truncated"] else None,
             "content": read_result["content"],
@@ -524,6 +544,8 @@ class AuditCovStore:
                     adjusted_start_line INTEGER NOT NULL,
                     adjusted_end_line INTEGER NOT NULL,
                     status TEXT NOT NULL,
+                    snapshot_tracked INTEGER NOT NULL DEFAULT 1,
+                    observed_content_sha256 TEXT,
                     created_at TEXT NOT NULL,
                     completed_at TEXT,
                     UNIQUE(session_id, call_id),
@@ -557,6 +579,19 @@ class AuditCovStore:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS ac_sessions_parent ON ac_sessions(parent_session_id)"
             )
+            event_columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(ac_read_events)")
+            }
+            if "snapshot_tracked" not in event_columns:
+                self.conn.execute(
+                    "ALTER TABLE ac_read_events "
+                    "ADD COLUMN snapshot_tracked INTEGER NOT NULL DEFAULT 1"
+                )
+            if "observed_content_sha256" not in event_columns:
+                self.conn.execute(
+                    "ALTER TABLE ac_read_events ADD COLUMN observed_content_sha256 TEXT"
+                )
 
     def _snapshot_files(self, root: Path) -> list[FileSnapshot]:
         snapshots = []
@@ -587,6 +622,15 @@ class AuditCovStore:
     def _match_target_file(
         self, raw_path: str
     ) -> tuple[sqlite3.Row, sqlite3.Row, Path] | None:
+        match = self._match_project_path(raw_path)
+        if match is None or match[1] is None:
+            return None
+        project, file_row, resolved, _ = match
+        return project, file_row, resolved
+
+    def _match_project_path(
+        self, raw_path: str
+    ) -> tuple[sqlite3.Row, sqlite3.Row | None, Path, str] | None:
         if not isinstance(raw_path, str) or not raw_path:
             return None
         candidate = external_path(raw_path).expanduser()
@@ -599,9 +643,68 @@ class AuditCovStore:
             except ValueError:
                 continue
             file_row = self._file(int(project["id"]), rel_path)
-            if file_row is not None:
-                matches.append((project, file_row, resolved))
+            matches.append((project, file_row, resolved, rel_path))
         return matches[0] if len(matches) == 1 else None
+
+    def _record_codex_read(
+        self,
+        context: AgentContext,
+        call_id: str,
+        project_id: int,
+        path: str,
+        requested_start: int,
+        requested_end: int,
+        actual_end: int,
+        snapshot_tracked: bool,
+        observed_content_sha256: str | None,
+    ) -> tuple[int, bool]:
+        session_id = self._ensure_session(project_id, context)
+        now = utc_now()
+        counted = snapshot_tracked and requested_start <= actual_end
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO ac_read_events(
+                    session_id, call_id, path, requested_start_line, requested_end_line,
+                    adjusted_start_line, adjusted_end_line, status, snapshot_tracked,
+                    observed_content_sha256, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, ?)
+                ON CONFLICT(session_id, call_id) DO UPDATE SET
+                    path = excluded.path,
+                    requested_start_line = excluded.requested_start_line,
+                    requested_end_line = excluded.requested_end_line,
+                    adjusted_start_line = excluded.adjusted_start_line,
+                    adjusted_end_line = excluded.adjusted_end_line,
+                    status = 'succeeded',
+                    snapshot_tracked = excluded.snapshot_tracked,
+                    observed_content_sha256 = excluded.observed_content_sha256,
+                    completed_at = excluded.completed_at
+                """,
+                (
+                    session_id,
+                    call_id,
+                    path,
+                    requested_start,
+                    requested_end,
+                    requested_start,
+                    actual_end,
+                    int(snapshot_tracked),
+                    observed_content_sha256,
+                    now,
+                    now,
+                ),
+            )
+            if counted:
+                self._merge_covered_range(session_id, path, requested_start, actual_end)
+            self.conn.execute(
+                "UPDATE ac_sessions SET updated_at = ? WHERE id = ?", (now, session_id)
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return session_id, counted
 
     def _require_project(self, project_id: int) -> sqlite3.Row:
         row = self.conn.execute(
@@ -937,6 +1040,16 @@ def snapshot_id_for(root: Path, files: list[FileSnapshot]) -> str:
         digest.update(f":{item.line_count}:".encode("ascii"))
         digest.update(item.content_sha256.encode("ascii"))
     return digest.hexdigest()
+
+
+def file_stats(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    line_count = 0
+    with path.open("rb") as handle:
+        for raw_line in handle:
+            digest.update(raw_line)
+            line_count += 1
+    return line_count, digest.hexdigest()
 
 
 def complete_line_end_for_bytes(

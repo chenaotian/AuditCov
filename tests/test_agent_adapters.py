@@ -117,6 +117,9 @@ class CodexPluginTests(unittest.TestCase):
         source = (
             ROOT / "plugins" / "auditcov" / "auditcov_mcp" / "server.py"
         ).read_text(encoding="utf-8")
+        self.assertIn("any regular file inside a configured project", source)
+        self.assertIn("other project files are still ", source)
+        self.assertIn("returned and audited.", source)
         self.assertIn("do not bypass it with shell or", source)
         self.assertIn("unless AuditCov is unavailable or fails", source)
 

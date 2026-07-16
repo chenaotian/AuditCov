@@ -17,6 +17,7 @@ class StoreTests(unittest.TestCase):
         self.repo.mkdir()
         (self.repo / "src").mkdir()
         (self.repo / "src" / "a.py").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+        (self.repo / "README").write_text("kernel readme\nsecond line\n", encoding="utf-8")
         (self.repo / "README.md").write_text("not source\n", encoding="utf-8")
         (self.repo / "node_modules").mkdir()
         (self.repo / "node_modules" / "ignored.js").write_text("ignored\n", encoding="utf-8")
@@ -153,6 +154,20 @@ class StoreTests(unittest.TestCase):
                     updated_at TEXT NOT NULL,
                     UNIQUE(project_id, agent_type, agent_session_id)
                 );
+                CREATE TABLE ac_read_events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    call_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    requested_start_line INTEGER NOT NULL,
+                    requested_end_line INTEGER NOT NULL,
+                    adjusted_start_line INTEGER NOT NULL,
+                    adjusted_end_line INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    UNIQUE(session_id, call_id)
+                );
                 """
             )
         finally:
@@ -164,6 +179,12 @@ class StoreTests(unittest.TestCase):
             }
             self.assertIn("session_title", columns)
             self.assertIn("parent_session_id", columns)
+            event_columns = {
+                row["name"]
+                for row in migrated.conn.execute("PRAGMA table_info(ac_read_events)")
+            }
+            self.assertIn("snapshot_tracked", event_columns)
+            self.assertIn("observed_content_sha256", event_columns)
         finally:
             migrated.close()
 
@@ -193,6 +214,34 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(coverage["covered_lines"], 2)
         file_detail = self.store.get_agent_file_detail(context, "src/a.py")
         self.assertEqual(file_detail["covered_ranges"], ["2-3"])
+
+    def test_codex_read_audits_project_file_outside_snapshot_without_counting(self) -> None:
+        context = AgentContext("codex", "thread-unlisted", "turn-1")
+        result = self.store.codex_read(context, "README", call_id="read-readme")
+
+        self.assertIn("1 | kernel readme", result["content"])
+        self.assertTrue(result["audit_recorded"])
+        self.assertFalse(result["snapshot_tracked"])
+        self.assertFalse(result["counted"])
+        self.assertEqual(self.store.get_agent_coverage(context)["covered_lines"], 0)
+
+        event = self.store.conn.execute(
+            "SELECT * FROM ac_read_events WHERE session_id = ? AND call_id = ?",
+            (result["session_id"], "read-readme"),
+        ).fetchone()
+        self.assertIsNotNone(event)
+        self.assertEqual(event["path"], "README")
+        self.assertEqual(event["status"], "succeeded")
+        self.assertEqual(event["snapshot_tracked"], 0)
+        self.assertEqual(len(event["observed_content_sha256"]), 64)
+
+    def test_codex_read_outside_configured_projects_keeps_project_error(self) -> None:
+        outside = self.root / "outside.py"
+        outside.write_text("outside\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            AuditCovError, "path is not part of any configured AuditCov project"
+        ):
+            self.store.codex_read(AgentContext("codex", "thread-outside"), str(outside))
 
     def test_hook_range_is_reduced_at_complete_line_boundary(self) -> None:
         large = self.repo / "src" / "large.py"

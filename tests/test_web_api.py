@@ -19,6 +19,7 @@ class WebApiTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         (self.repo / "main.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+        (self.repo / "README").write_text("project notes\n", encoding="utf-8")
         self.server = AuditCovWebServer(("127.0.0.1", 0), self.root / "state.sqlite3")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -81,6 +82,29 @@ class WebApiTests(unittest.TestCase):
             },
         )
         self.assertFalse(result["tracked"])
+
+    def test_codex_reads_and_audits_project_file_outside_snapshot(self) -> None:
+        _, project = self.request(
+            "POST", "/api/projects", {"project_root": str(self.repo), "name": "Repo"}
+        )
+        _, result = self.request(
+            "POST",
+            "/api/codex/read",
+            {
+                "agent_type": "codex",
+                "agent_session_id": "thread-1",
+                "call_id": "read-readme",
+                "path": str(self.repo / "README"),
+            },
+        )
+        self.assertIn("1 | project notes", result["content"])
+        self.assertTrue(result["audit_recorded"])
+        self.assertFalse(result["snapshot_tracked"])
+        self.assertFalse(result["counted"])
+
+        _, detail = self.request("GET", f"/api/projects/{project['id']}")
+        self.assertEqual(detail["session_count"], 1)
+        self.assertEqual(detail["covered_lines"], 0)
 
     def test_child_session_metadata_is_exposed_for_web_grouping(self) -> None:
         _, project = self.request(

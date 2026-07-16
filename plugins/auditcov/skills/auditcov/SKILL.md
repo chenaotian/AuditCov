@@ -23,7 +23,7 @@ For source content used in the audit, call `auditcov_read_file`. Do not substitu
 
 The Codex MCP exposes:
 
-- `auditcov_read_file`: read tracked complete source lines through the central server.
+- `auditcov_read_file`: read any regular file inside a configured project through the central server. Reads outside the frozen source snapshot are audited but do not count toward coverage.
 - `auditcov_get_coverage`: query project, directory, or file coverage for the current Codex `thread_id`.
 - `auditcov_get_file_detail`: inspect covered and uncovered ranges for one file.
 
@@ -33,6 +33,6 @@ If a read is truncated, continue from `next_start_line`. Use coverage and file d
 
 Each Web project has one frozen whole-repository source snapshot shared by every Agent session. Parent sessions can be expanded to show Claude Code or OpenCode subagents. Parent and child checkboxes are independent: selecting a parent includes only that parent's own reads, and a child must be selected separately to include its reads.
 
-For exactly the selected parent and child sessions, the numerator is the union of their successful covered ranges and the denominator remains the project's single frozen snapshot. Before-hook attempts do not count. Reads outside configured projects are ignored.
+For exactly the selected parent and child sessions, the numerator is the union of their successful covered ranges and the denominator remains the project's single frozen snapshot. Before-hook attempts do not count. Reads outside configured projects are ignored. Codex reads of project files outside the snapshot are returned and audited, but do not change the numerator or denominator.
 
 Always describe the metric as objective read coverage, never as proof that the security audit is complete.

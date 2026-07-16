@@ -30,6 +30,8 @@ class ServerTests(unittest.TestCase):
             item for item in tool_definitions() if item["name"] == "auditcov_read_file"
         )
         description = read_tool["description"]
+        self.assertIn("any regular file inside a configured project", description)
+        self.assertIn("other project files are still returned and audited", description)
         self.assertIn("do not bypass it with shell or other system commands", description)
         self.assertIn("unless AuditCov is unavailable or fails", description)
 

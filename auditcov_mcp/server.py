@@ -111,7 +111,10 @@ def tool_definitions() -> list[JSON]:
             "title": "Read Tracked Project File",
             "description": (
                 "Read complete source lines through the central AuditCov server and record "
-                "them for the current Codex thread. The project must first be created in the Web UI."
+                "them for the current Codex thread. When the user requests AuditCov, prefer "
+                "this tool for direct source-code reads and do not bypass it with shell or "
+                "other system commands unless AuditCov is unavailable or fails. The project "
+                "must first be created in the Web UI."
             ),
             "inputSchema": {
                 "type": "object",

@@ -112,6 +112,15 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertNotIn("children.map((child) => child.id)", source)
 
 
+class CodexPluginTests(unittest.TestCase):
+    def test_read_tool_description_requires_auditcov_unless_it_fails(self) -> None:
+        source = (
+            ROOT / "plugins" / "auditcov" / "auditcov_mcp" / "server.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("do not bypass it with shell or", source)
+        self.assertIn("unless AuditCov is unavailable or fails", source)
+
+
 class InstallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

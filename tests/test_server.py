@@ -25,6 +25,14 @@ class ServerTests(unittest.TestCase):
             ["auditcov_read_file", "auditcov_get_coverage", "auditcov_get_file_detail"],
         )
 
+    def test_read_tool_description_requires_auditcov_unless_it_fails(self) -> None:
+        read_tool = next(
+            item for item in tool_definitions() if item["name"] == "auditcov_read_file"
+        )
+        description = read_tool["description"]
+        self.assertIn("do not bypass it with shell or other system commands", description)
+        self.assertIn("unless AuditCov is unavailable or fails", description)
+
     def test_context_from_codex_meta(self) -> None:
         context = context_from_meta(
             {"x-codex-turn-metadata": {"thread_id": "thread-123", "turn_id": "turn-456"}}

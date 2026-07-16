@@ -1,6 +1,6 @@
 {
   "name": "auditcov",
-  "version": "0.2.0+codex.20260716022014",
+  "version": "0.2.0+codex.20260716050611",
   "description": "AuditCov connects Codex to a local cross-agent objective source-read coverage server.",
   "author": {
     "name": "AuditCov"

@@ -427,12 +427,14 @@ function normalizedReadCount(line) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 function readHeat(readCount) {
-  const logarithm = Math.log2(Math.max(1, readCount));
-  const depth = logarithm / (logarithm + 4);
-  const lightness = 50 - depth * 35;
+  // Front-load contrast so 1 -> 2 and 2 -> 3 reads are immediately visible,
+  // then approach a stable dark green as the count keeps increasing.
+  const depth = 1 - Math.exp(-0.75 * (Math.max(1, readCount) - 1));
+  const saturation = 52 + depth * 18;
+  const lightness = 56 - depth * 32;
   return {
-    railColor: `hsl(158 58% ${lightness}%)`,
-    rowAlpha: String(0.14 + depth * 0.2),
+    railColor: `hsl(158 ${saturation}% ${lightness}%)`,
+    rowAlpha: String(0.08 + depth * 0.26),
   };
 }
 function shortId(value) { return value.length > 22 ? `${value.slice(0, 10)}...${value.slice(-7)}` : value; }

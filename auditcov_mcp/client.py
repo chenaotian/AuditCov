@@ -32,7 +32,10 @@ class AuditCovClient:
         return self._open(request)
 
     def get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        query = urlencode({key: value for key, value in params.items() if value is not None})
+        query = urlencode(
+            {key: value for key, value in params.items() if value is not None},
+            doseq=True,
+        )
         request = Request(self.base_url + path + ("?" + query if query else ""))
         return self._open(request)
 

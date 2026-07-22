@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "auditcov"
 version = "0.2.0"
@@ -7,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
+auditcov = "auditcov_mcp.cli:main"
 auditcov-mcp = "auditcov_mcp.server:main"
 auditcov-server = "auditcov_mcp.web:main"
 auditcov-web = "auditcov_mcp.web:main"
@@ -17,3 +22,7 @@ pythonpath = ["."]
 
 [tool.setuptools.package-data]
 auditcov_mcp = ["web_static/*.html", "web_static/*.css", "web_static/*.js"]
+
+[tool.setuptools.packages.find]
+include = ["auditcov_mcp*"]
+exclude = ["tests*", "hooks*", "plugins*", "scripts*", "tools*"]

@@ -357,13 +357,24 @@ function renderFile(file) {
   els.codeView.replaceChildren();
   const fragment = document.createDocumentFragment();
   for (const line of file.lines) {
+    const readCount = Math.max(normalizedReadCount(line), line.covered ? 1 : 0);
+    const covered = Boolean(line.covered) || readCount > 0;
     const row = document.createElement("div");
-    row.className = `code-line ${line.covered ? "covered" : "uncovered"}`;
+    row.className = `code-line ${covered ? "covered" : "uncovered"}`;
     const number = document.createElement("div");
     number.className = "line-number";
     number.textContent = line.number;
     const rail = document.createElement("div");
     rail.className = "line-rail";
+    if (covered) {
+      const label = readCount === 1 ? "Read 1 time" : `Read ${readCount} times`;
+      const heat = readHeat(readCount);
+      rail.title = label;
+      rail.setAttribute("role", "img");
+      rail.setAttribute("aria-label", label);
+      row.style.setProperty("--covered-rail-color", heat.railColor);
+      row.style.setProperty("--covered-row-alpha", heat.rowAlpha);
+    }
     const code = document.createElement("div");
     code.className = "line-code";
     code.textContent = line.text || " ";
@@ -411,6 +422,19 @@ function setMessage(element, text, kind) {
 function showFatal(error) { setMessage(els.projectMessage, error.message, "error"); }
 function formatPercent(value) { return `${Number(value || 0).toFixed(2)}%`; }
 function clamp(value) { return Math.max(0, Math.min(100, Number(value || 0))); }
+function normalizedReadCount(line) {
+  const value = Number(line.read_count ?? (line.covered ? 1 : 0));
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+function readHeat(readCount) {
+  const logarithm = Math.log2(Math.max(1, readCount));
+  const depth = logarithm / (logarithm + 4);
+  const lightness = 50 - depth * 35;
+  return {
+    railColor: `hsl(158 58% ${lightness}%)`,
+    rowAlpha: String(0.14 + depth * 0.2),
+  };
+}
 function shortId(value) { return value.length > 22 ? `${value.slice(0, 10)}...${value.slice(-7)}` : value; }
 function expandParents(path) {
   state.expandedTreePaths.add("");

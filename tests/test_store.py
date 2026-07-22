@@ -81,6 +81,61 @@ class StoreTests(unittest.TestCase):
         selected = self.store.get_project_tree(self.project["id"], [first_id])
         self.assertEqual(selected["covered_lines"], 2)
 
+    def test_file_view_counts_overlapping_successful_reads(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        first = AgentContext("claude-code", "first-session")
+        second = AgentContext("opencode", "second-session")
+
+        self.store.prepare_read(first, "first-1", path, 1, 2)
+        self.store.complete_read(first, "first-1", path, True)
+        self.store.prepare_read(first, "first-2", path, 2, 4)
+        self.store.complete_read(first, "first-2", path, True)
+        self.store.complete_read(first, "first-2", path, True)
+        self.store.prepare_read(first, "attempt-only", path, 1, 4)
+        self.store.prepare_read(first, "failed", path, 1, 4)
+        self.store.complete_read(first, "failed", path, False)
+
+        self.store.prepare_read(second, "second-1", path, 3, 4)
+        self.store.complete_read(second, "second-1", path, True)
+
+        sessions = self.store.get_project(self.project["id"])["sessions"]
+        first_id = next(
+            item["id"] for item in sessions
+            if item["agent_session_id"] == "first-session"
+        )
+        second_id = next(
+            item["id"] for item in sessions
+            if item["agent_session_id"] == "second-session"
+        )
+
+        first_view = self.store.get_project_file_view(
+            self.project["id"], [first_id], "src/a.py"
+        )
+        both_view = self.store.get_project_file_view(
+            self.project["id"], [first_id, second_id], "src/a.py"
+        )
+        second_view = self.store.get_project_file_view(
+            self.project["id"], [second_id], "src/a.py"
+        )
+        empty_view = self.store.get_project_file_view(
+            self.project["id"], [], "src/a.py"
+        )
+
+        self.assertEqual(
+            [line["read_count"] for line in first_view["lines"]], [1, 2, 1, 1]
+        )
+        self.assertEqual(first_view["max_read_count"], 2)
+        self.assertEqual(first_view["covered_lines"], 4)
+        self.assertEqual(
+            [line["read_count"] for line in both_view["lines"]], [1, 2, 2, 2]
+        )
+        self.assertEqual(
+            [line["read_count"] for line in second_view["lines"]], [0, 0, 1, 1]
+        )
+        self.assertEqual(
+            [line["read_count"] for line in empty_view["lines"]], [0, 0, 0, 0]
+        )
+
     def test_project_coverage_batches_range_queries_for_large_snapshots(self) -> None:
         with self.store.conn:
             self.store.conn.executemany(
@@ -217,6 +272,11 @@ class StoreTests(unittest.TestCase):
             }
             self.assertIn("snapshot_tracked", event_columns)
             self.assertIn("observed_content_sha256", event_columns)
+            indexes = {
+                row["name"]
+                for row in migrated.conn.execute("PRAGMA index_list(ac_read_events)")
+            }
+            self.assertIn("ac_read_events_succeeded_path", indexes)
         finally:
             migrated.close()
 

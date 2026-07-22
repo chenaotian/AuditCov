@@ -109,6 +109,9 @@ class OpenCodePluginTests(unittest.TestCase):
         self.assertIn("renderSessionNode", source)
         self.assertIn("session.parent_session_id", source)
         self.assertIn("Include only this agent's Read coverage", source)
+        self.assertIn("line.read_count", source)
+        self.assertIn("Read ${readCount} times", source)
+        self.assertIn("readHeat(readCount)", source)
         self.assertNotIn("children.map((child) => child.id)", source)
 
 

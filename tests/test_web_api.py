@@ -68,6 +68,26 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(coverage["covered_lines"], 2)
 
+        second_payload = {
+            **before_payload,
+            "call_id": "call-2",
+            "start_line": 2,
+            "end_line": 3,
+        }
+        self.request("POST", "/api/read/before", second_payload)
+        self.request(
+            "POST", "/api/read/after", {**second_payload, "success": True, "tool_result": {}}
+        )
+        _, file_view = self.request(
+            "GET",
+            f"/api/projects/{project['id']}/file"
+            f"?session_id={before['session_id']}&path=main.py",
+        )
+        self.assertEqual(
+            [line["read_count"] for line in file_view["lines"]], [1, 2, 1]
+        )
+        self.assertEqual(file_view["max_read_count"], 2)
+
     def test_read_outside_projects_is_ignored(self) -> None:
         outside = self.root / "outside.py"
         outside.write_text("outside\n", encoding="utf-8")

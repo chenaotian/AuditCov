@@ -644,11 +644,12 @@ h1 {
 }
 
 .code-line.covered .line-rail {
-  background: var(--covered);
+  background: var(--covered-rail-color, var(--covered));
+  cursor: help;
 }
 
 .code-line.covered {
-  background: rgba(35, 120, 93, 0.16);
+  background: rgba(35, 120, 93, var(--covered-row-alpha, 0.16));
 }
 
 .code-line.uncovered .line-rail {

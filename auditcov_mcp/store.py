@@ -458,14 +458,19 @@ class AuditCovStore:
         if file_row is None:
             raise AuditCovError(f"path is not part of the project snapshot: {path}")
         ranges = self._aggregate_ranges(selected, rel_path)
+        read_count_changes = self._read_count_changes(selected, rel_path)
         total = int(file_row["line_count"])
         abs_path = Path(project["project_root"]) / Path(rel_path)
         digest = hashlib.sha256()
         lines = []
         range_index = 0
+        read_count = 0
+        max_read_count = 0
         with abs_path.open("rb") as handle:
             for number, raw_line in enumerate(handle, start=1):
                 digest.update(raw_line)
+                read_count += read_count_changes.get(number, 0)
+                max_read_count = max(max_read_count, read_count)
                 while range_index < len(ranges) and number > ranges[range_index][1]:
                     range_index += 1
                 covered = (
@@ -477,6 +482,7 @@ class AuditCovStore:
                         "number": number,
                         "text": raw_line.decode("utf-8", errors="replace").rstrip("\r\n"),
                         "covered": covered,
+                        "read_count": read_count,
                     }
                 )
         covered_lines = range_size(ranges)
@@ -491,6 +497,7 @@ class AuditCovStore:
             "percent": percent(covered_lines, total),
             "covered_ranges": format_ranges(ranges),
             "uncovered_ranges": format_ranges(complement_ranges(ranges, total)),
+            "max_read_count": max_read_count,
             "content_sha256": file_row["content_sha256"],
             "current_sha256": current_sha,
             "content_changed": current_sha != file_row["content_sha256"],
@@ -593,6 +600,15 @@ class AuditCovStore:
                 self.conn.execute(
                     "ALTER TABLE ac_read_events ADD COLUMN observed_content_sha256 TEXT"
                 )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ac_read_events_succeeded_path
+                ON ac_read_events(
+                    session_id, path, adjusted_start_line, adjusted_end_line
+                )
+                WHERE status = 'succeeded' AND snapshot_tracked = 1
+                """
+            )
 
     def _snapshot_files(self, root: Path) -> list[FileSnapshot]:
         snapshots = []
@@ -980,6 +996,32 @@ class AuditCovStore:
             [*session_ids, path],
         )
         return merge_ranges([(int(row["start_line"]), int(row["end_line"])) for row in rows])
+
+    def _read_count_changes(self, session_ids: list[int], path: str) -> dict[int, int]:
+        """Build sweep-line deltas for successful reads in exactly these sessions."""
+        if not session_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in session_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT adjusted_start_line, adjusted_end_line
+            FROM ac_read_events
+            WHERE session_id IN ({placeholders})
+              AND path = ?
+              AND status = 'succeeded'
+              AND snapshot_tracked = 1
+            """,
+            [*session_ids, path],
+        )
+        changes: dict[int, int] = {}
+        for row in rows:
+            start = int(row["adjusted_start_line"])
+            end = int(row["adjusted_end_line"])
+            if start < 1 or end < start:
+                continue
+            changes[start] = changes.get(start, 0) + 1
+            changes[end + 1] = changes.get(end + 1, 0) - 1
+        return changes
 
     def _merge_covered_range(
         self, session_id: int, path: str, start_line: int, end_line: int

@@ -1,4 +1,8 @@
 const STORAGE_KEY = "auditcov.webViewerState.v2";
+const WORK_AREA_MIN_LEFT_WIDTH = 260;
+const WORK_AREA_MIN_CODE_WIDTH = 320;
+const WORK_AREA_RESIZE_STEP = 24;
+const WORK_AREA_DESKTOP_QUERY = "(min-width: 981px)";
 
 const state = {
   projects: [],
@@ -8,6 +12,7 @@ const state = {
   detail: null,
   coverage: null,
   settings: null,
+  leftColumnWidth: null,
   expandedTreePaths: new Set([""]),
   expandedSessionIds: new Set(),
 };
@@ -18,14 +23,112 @@ const ids = [
   "workdirButton", "settingsMeta", "settingsMessage", "projectList",
   "projectKicker", "projectTitle", "projectMeta", "metricGrid",
   "threadSelector", "treeView", "filePath", "fileStats", "codeView",
+  "workArea", "leftColumn", "workAreaResizer",
 ];
 const els = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
 restoreState();
+setupWorkAreaResizer();
 els.refreshButton.addEventListener("click", loadProjects);
 els.projectForm.addEventListener("submit", createProject);
 els.workdirForm.addEventListener("submit", moveWorkdir);
 loadProjects().catch(showFatal);
+
+function setupWorkAreaResizer() {
+  const resizer = els.workAreaResizer;
+  let dragging = false;
+  let dragStartX = 0;
+  let dragStartWidth = 0;
+
+  const resizeFromPointer = (event) => {
+    if (!dragging) return;
+    setLeftColumnWidth(dragStartWidth + event.clientX - dragStartX);
+  };
+
+  const stopDragging = (event) => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("resizing-work-area");
+    if (resizer.hasPointerCapture(event.pointerId)) {
+      resizer.releasePointerCapture(event.pointerId);
+    }
+    saveState();
+  };
+
+  resizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !event.isPrimary || dragging || !workAreaIsResizable()) return;
+    event.preventDefault();
+    dragging = true;
+    dragStartX = event.clientX;
+    dragStartWidth = els.leftColumn.getBoundingClientRect().width;
+    document.body.classList.add("resizing-work-area");
+    resizer.setPointerCapture(event.pointerId);
+  });
+  resizer.addEventListener("pointermove", resizeFromPointer);
+  resizer.addEventListener("pointerup", stopDragging);
+  resizer.addEventListener("pointercancel", stopDragging);
+  resizer.addEventListener("lostpointercapture", stopDragging);
+  resizer.addEventListener("keydown", resizeWorkAreaFromKeyboard);
+  window.addEventListener("resize", applyWorkAreaWidth);
+
+  applyWorkAreaWidth();
+}
+
+function workAreaIsResizable() {
+  return window.matchMedia(WORK_AREA_DESKTOP_QUERY).matches;
+}
+
+function applyWorkAreaWidth() {
+  if (!workAreaIsResizable()) return;
+  if (state.leftColumnWidth === null) {
+    els.workArea.style.removeProperty("--left-column-width");
+  }
+  setLeftColumnWidth(state.leftColumnWidth ?? renderedLeftColumnWidth(), false);
+}
+
+function workAreaWidthBounds() {
+  const totalWidth = els.workArea.getBoundingClientRect().width;
+  const resizerWidth = els.workAreaResizer.getBoundingClientRect().width || 14;
+  return {
+    min: WORK_AREA_MIN_LEFT_WIDTH,
+    max: Math.max(
+      WORK_AREA_MIN_LEFT_WIDTH,
+      Math.floor(totalWidth - resizerWidth - WORK_AREA_MIN_CODE_WIDTH),
+    ),
+  };
+}
+
+function renderedLeftColumnWidth() {
+  return els.leftColumn.getBoundingClientRect().width;
+}
+
+function setLeftColumnWidth(value, rememberPreference = true) {
+  const bounds = workAreaWidthBounds();
+  const numericValue = Number(value);
+  const requested = Number.isFinite(numericValue) ? numericValue : WORK_AREA_MIN_LEFT_WIDTH;
+  const width = Math.round(Math.max(bounds.min, Math.min(bounds.max, requested)));
+  if (rememberPreference) state.leftColumnWidth = width;
+  els.workArea.style.setProperty("--left-column-width", `${width}px`);
+  els.workAreaResizer.setAttribute("aria-valuemin", String(bounds.min));
+  els.workAreaResizer.setAttribute("aria-valuemax", String(bounds.max));
+  els.workAreaResizer.setAttribute("aria-valuenow", String(width));
+  return width;
+}
+
+function resizeWorkAreaFromKeyboard(event) {
+  if (!workAreaIsResizable()) return;
+  const bounds = workAreaWidthBounds();
+  const current = renderedLeftColumnWidth();
+  let next;
+  if (event.key === "ArrowLeft") next = current - WORK_AREA_RESIZE_STEP;
+  else if (event.key === "ArrowRight") next = current + WORK_AREA_RESIZE_STEP;
+  else if (event.key === "Home") next = bounds.min;
+  else if (event.key === "End") next = bounds.max;
+  else return;
+  event.preventDefault();
+  setLeftColumnWidth(next);
+  saveState();
+}
 
 async function createProject(event) {
   event.preventDefault();
@@ -450,6 +553,7 @@ function saveState() {
     selectedProjectId: state.selectedProjectId,
     selectedSessionIds: [...state.selectedSessionIds],
     selectedFilePath: state.selectedFilePath,
+    leftColumnWidth: state.leftColumnWidth,
     expandedTreePaths: [...state.expandedTreePaths],
     expandedSessionIds: [...state.expandedSessionIds],
   }));
@@ -460,6 +564,9 @@ function restoreState() {
     if (Number.isInteger(saved.selectedProjectId)) state.selectedProjectId = saved.selectedProjectId;
     if (Array.isArray(saved.selectedSessionIds)) state.selectedSessionIds = new Set(saved.selectedSessionIds);
     if (typeof saved.selectedFilePath === "string") state.selectedFilePath = saved.selectedFilePath;
+    if (Number.isFinite(Number(saved.leftColumnWidth)) && Number(saved.leftColumnWidth) > 0) {
+      state.leftColumnWidth = Number(saved.leftColumnWidth);
+    }
     if (Array.isArray(saved.expandedTreePaths)) state.expandedTreePaths = new Set(saved.expandedTreePaths);
     if (Array.isArray(saved.expandedSessionIds)) state.expandedSessionIds = new Set(saved.expandedSessionIds);
   } catch (_error) { return; }

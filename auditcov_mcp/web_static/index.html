@@ -48,8 +48,8 @@
           <div id="projectMeta" class="meta-line"></div>
         </section>
 
-        <section class="work-area">
-          <div class="left-column">
+        <section id="workArea" class="work-area">
+          <div id="leftColumn" class="left-column">
             <section class="coverage-card">
               <section id="metricGrid" class="metric-grid"></section>
               <section id="threadSelector" class="thread-selector empty-state">Select a project to choose agent sessions.</section>
@@ -59,6 +59,17 @@
               <div id="treeView" class="tree-view empty-state">No initialized projects found.</div>
             </div>
           </div>
+          <div
+            id="workAreaResizer"
+            class="work-area-resizer"
+            role="separator"
+            aria-label="Resize project tree and code view"
+            aria-orientation="vertical"
+            aria-valuemin="260"
+            aria-valuemax="960"
+            aria-valuenow="320"
+            tabindex="0"
+          ></div>
           <div class="file-panel">
             <div class="file-toolbar">
               <div>

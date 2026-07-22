@@ -461,11 +461,47 @@ h1 {
 }
 
 .work-area {
+  --left-column-width: clamp(300px, 20vw, 340px);
   display: grid;
-  grid-template-columns: clamp(300px, 20vw, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, var(--left-column-width)) 14px minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
-  gap: 14px;
+  gap: 0;
+}
+
+.work-area-resizer {
+  position: relative;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.work-area-resizer::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 6px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--line);
+  content: "";
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.work-area-resizer:hover::before,
+.work-area-resizer:focus-visible::before,
+body.resizing-work-area .work-area-resizer::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+body.resizing-work-area,
+body.resizing-work-area * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .left-column {
@@ -715,6 +751,10 @@ h1 {
   .metric-grid,
   .work-area {
     grid-template-columns: 1fr;
+  }
+
+  .work-area-resizer {
+    display: none;
   }
 
   .work-area,

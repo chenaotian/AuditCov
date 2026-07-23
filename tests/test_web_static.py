@@ -275,21 +275,150 @@ class WebStaticTests(unittest.TestCase):
     def test_file_navigation_flat_mode_sorts_by_peak_then_path(self) -> None:
         render_tree = self.javascript_function("renderTree")
         render_all = self.javascript_function("renderAllFiles")
+        sorted_entries = self.javascript_function("sortedAllFileEntries")
         self.assertIn('state.fileViewMode === "files"', render_tree)
-        self.assertIn("collectFileNodes(root)", render_all)
-        self.assertIn('state.fileSortDirection === "asc"', render_all)
+        self.assertIn("sortedAllFileEntries(root)", render_all)
+        self.assertIn("collectFileNodes(root).map", sorted_entries)
+        self.assertIn("count: fileMaxReadCount(file)", sorted_entries)
+        self.assertIn("path: String(file.path)", sorted_entries)
+        self.assertIn('state.fileSortDirection === "asc"', sorted_entries)
         self.assertRegex(
-            render_all,
-            r"fileMaxReadCount\(left\)\s*-\s*fileMaxReadCount\(right\)",
+            sorted_entries,
+            r"left\.count\s*-\s*right\.count",
         )
         self.assertRegex(
-            render_all,
-            r"fileMaxReadCount\(right\)\s*-\s*fileMaxReadCount\(left\)",
+            sorted_entries,
+            r"right\.count\s*-\s*left\.count",
         )
-        difference_check = render_all.index("if (difference) return difference;")
-        path_tie_break = render_all.index(".localeCompare(", difference_check)
+        difference_check = sorted_entries.index("if (difference) return difference;")
+        path_tie_break = sorted_entries.index(
+            "FILE_PATH_COLLATOR.compare(left.path, right.path)",
+            difference_check,
+        )
         self.assertLess(difference_check, path_tie_break)
-        self.assertIn("file.path", render_all)
+        self.assertIn("cached.root === root", sorted_entries)
+        self.assertIn("cached.direction === state.fileSortDirection", sorted_entries)
+
+    def test_directory_tree_only_builds_children_for_expanded_branches(self) -> None:
+        render_node = self.javascript_function("renderTreeNode")
+        expanded_block = re.search(
+            r"if\s*\(\s*expanded\s*\)\s*\{(?P<body>[\s\S]*?)\n\s*\}",
+            render_node,
+        )
+        self.assertIsNotNone(expanded_block)
+        assert expanded_block is not None
+        self.assertIn("renderTreeNode(child)", expanded_block.group("body"))
+        self.assertNotIn("collapsed", render_node)
+
+    def test_all_files_is_bounded_and_can_append_more_without_full_rerender(self) -> None:
+        render_all = self.javascript_function("renderAllFiles")
+        load_more = self.javascript_function("renderAllFilesLoadMore")
+        render_range = self.javascript_function("renderAllFileRange")
+        self.assertRegex(
+            self.javascript,
+            r"ALL_FILES_INITIAL_LIMIT\s*=\s*\d+",
+        )
+        self.assertIn(
+            "Math.min(state.allFilesVisibleLimit, entries.length)",
+            render_all,
+        )
+        self.assertIn("renderAllFileRange(entries, 0, visibleCount)", render_all)
+        self.assertIn("renderAllFilesLoadMore(entries, visibleCount)", render_all)
+        self.assertIn("ALL_FILES_BATCH_SIZE", load_more)
+        self.assertIn("wrapper.before(renderAllFileRange(", load_more)
+        self.assertIn("state.allFilesVisibleLimit = nextCount", load_more)
+        self.assertIn("index < end", render_range)
+        self.assertRegex(self.css, r"\.all-files-load-more\s*\{")
+
+    def test_all_files_click_keeps_loaded_batch_and_updates_only_selection(self) -> None:
+        load_file = self.javascript_function("loadFile")
+        update_selection = self.javascript_function("updateFileNavigationSelection")
+        files_branch = re.search(
+            r'if\s*\(\s*state\.fileViewMode\s*===\s*"files"\s*\)'
+            r"\s*\{(?P<body>[\s\S]*?)\}\s*else\s*\{",
+            load_file,
+        )
+        self.assertIsNotNone(files_branch)
+        assert files_branch is not None
+        self.assertIn("updateFileNavigationSelection(previousPath, path)", files_branch.group("body"))
+        self.assertNotIn("renderTree(", files_branch.group("body"))
+        self.assertIn("state.fileNavigationRows.get(previousPath)", update_selection)
+        self.assertIn("state.fileNavigationRows.get(nextPath)", update_selection)
+        self.assertNotIn("allFilesVisibleLimit", load_file)
+
+    def test_all_files_pagination_resets_for_sort_project_and_mode_changes(self) -> None:
+        controls = self.javascript_function("setupFileNavigationControls")
+        set_mode = self.javascript_function("setFileViewMode")
+        render_all = self.javascript_function("renderAllFiles")
+        reset = self.javascript_function("resetAllFilesView")
+        clear = self.javascript_function("clearProjectSelection")
+        self.assertIn("resetAllFilesView()", controls)
+        self.assertIn("resetAllFilesView()", set_mode)
+        self.assertIn(
+            "state.allFilesProjectId !== state.selectedProjectId",
+            render_all,
+        )
+        self.assertIn("resetAllFilesView()", render_all)
+        self.assertIn("resetAllFilesView()", clear)
+        self.assertIn(
+            "state.allFilesVisibleLimit = ALL_FILES_INITIAL_LIMIT",
+            reset,
+        )
+
+    def test_all_session_requests_omit_redundant_session_ids(self) -> None:
+        selection = self.javascript_function("selectionParams")
+        self.assertIn("state.detail?.sessions || []", selection)
+        self.assertIn(
+            "sessions.length === state.selectedSessionIds.size",
+            selection,
+        )
+        self.assertIn(
+            "state.selectedSessionIds.has(session.id)",
+            selection,
+        )
+        all_selected = selection.index("if (allSelected) return params;")
+        empty_selected = selection.index(
+            'params.set("selection", "none")',
+            all_selected,
+        )
+        append_selected = selection.index(
+            'params.append("session_id"',
+            empty_selected,
+        )
+        self.assertLess(all_selected, empty_selected)
+        self.assertLess(empty_selected, append_selected)
+
+    def test_stale_project_coverage_and_file_responses_are_ignored(self) -> None:
+        load_project = self.javascript_function("loadProject")
+        load_coverage = self.javascript_function("loadCoverage")
+        load_file = self.javascript_function("loadFile")
+        clear = self.javascript_function("clearProjectSelection")
+
+        self.assertIn("++state.projectRequestGeneration", load_project)
+        self.assertIn(
+            "requestGeneration !== state.projectRequestGeneration",
+            load_project,
+        )
+        self.assertIn("++state.coverageRequestGeneration", load_coverage)
+        self.assertIn(
+            "requestGeneration !== state.coverageRequestGeneration",
+            load_coverage,
+        )
+        self.assertIn("++state.fileRequestGeneration", load_file)
+        self.assertIn(
+            "requestGeneration !== state.fileRequestGeneration",
+            load_file,
+        )
+        self.assertIn(
+            "state.fileRequestGeneration === invalidatedFileGeneration",
+            load_coverage,
+        )
+        for generation in (
+            "projectRequestGeneration",
+            "coverageRequestGeneration",
+            "fileRequestGeneration",
+        ):
+            self.assertIn(f"state.{generation} += 1", clear)
 
     def test_file_peak_badges_show_zero_red_and_positive_green_depth(self) -> None:
         render_node = self.javascript_function("renderFileNavigationNode")

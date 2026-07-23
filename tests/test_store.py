@@ -114,6 +114,20 @@ class StoreTests(unittest.TestCase):
             ).fetchone()[0],
             0,
         )
+        for table in (
+            "ac_project_stats",
+            "ac_project_file_stats",
+            "ac_project_covered_ranges",
+            "ac_project_read_deltas",
+        ):
+            self.assertEqual(
+                self.store.conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE project_id = ?",
+                    (self.project["id"],),
+                ).fetchone()[0],
+                0,
+                table,
+            )
         self.assertEqual(
             list(self.store.conn.execute("PRAGMA foreign_key_check")),
             [],
@@ -239,6 +253,67 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(file_node([second_id])["max_read_count"], 1)
         self.assertEqual(file_node([])["max_read_count"], 0)
 
+        duplicate = self.store.complete_read(
+            first, "first-2", path, True, 1, 4
+        )
+        self.assertFalse(duplicate["counted"])
+        self.assertTrue(duplicate["duplicate"])
+        cached_view = self.store.get_project_file_view(
+            self.project["id"], None, "src/a.py"
+        )
+        self.assertEqual(
+            [line["read_count"] for line in cached_view["lines"]], [1, 2, 2, 2]
+        )
+        self.assertEqual(cached_view["max_read_count"], 2)
+
+    def test_terminal_hook_result_is_immutable(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        failed = AgentContext("opencode", "failed-terminal")
+        self.store.prepare_read(failed, "same-call", path, 1, 4)
+        self.store.complete_read(failed, "same-call", path, False)
+        replay = self.store.complete_read(failed, "same-call", path, True)
+        self.assertTrue(replay["duplicate"])
+        self.assertFalse(replay["counted"])
+        self.assertEqual(
+            self.store.get_project_coverage_summary(self.project["id"])[
+                "covered_lines"
+            ],
+            0,
+        )
+
+        succeeded = AgentContext("claude-code", "success-terminal")
+        self.store.prepare_read(succeeded, "success-call", path, 1, 2)
+        self.store.complete_read(succeeded, "success-call", path, True)
+        self.store.prepare_read(succeeded, "success-call", path, 3, 4)
+        replay = self.store.complete_read(
+            succeeded, "success-call", path, False, 3, 4
+        )
+        self.assertTrue(replay["duplicate"])
+        self.assertEqual(
+            self.store.get_project_coverage_summary(self.project["id"])[
+                "covered_lines"
+            ],
+            2,
+        )
+
+    def test_codex_call_id_replay_does_not_increment_read_peak(self) -> None:
+        context = AgentContext("codex", "idempotent-thread")
+        first = self.store.codex_read(
+            context, "src/a.py", 1, 3, call_id="stable-call"
+        )
+        replay = self.store.codex_read(
+            context, "src/a.py", 2, 4, call_id="stable-call"
+        )
+        self.assertTrue(first["counted"])
+        self.assertFalse(replay["counted"])
+        view = self.store.get_project_file_view(
+            self.project["id"], None, "src/a.py"
+        )
+        self.assertEqual(
+            [line["read_count"] for line in view["lines"]], [1, 1, 1, 0]
+        )
+        self.assertEqual(view["max_read_count"], 1)
+
     def test_project_tree_groups_peak_read_counts_for_every_file(self) -> None:
         multi_repo = self.root / "multi"
         multi_repo.mkdir()
@@ -266,42 +341,146 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(files, {"a.py": 2, "b.py": 1, "c.py": 0})
 
     def test_project_coverage_batches_range_queries_for_large_snapshots(self) -> None:
-        with self.store.conn:
-            self.store.conn.executemany(
-                """
-                INSERT INTO ac_files(project_id, path, line_count, content_sha256)
-                VALUES (?, ?, 1, ?)
-                """,
-                [
-                    (self.project["id"], f"src/generated-{index}.py", "0" * 64)
-                    for index in range(100)
-                ],
+        large_repo = self.root / "large"
+        large_repo.mkdir()
+        for index in range(100):
+            (large_repo / f"generated-{index}.py").write_text(
+                "line\n", encoding="utf-8"
             )
+        project = self.store.create_project(str(large_repo), "Large")
         context = AgentContext("codex", "batched-thread")
-        self.store.codex_read(context, "src/a.py", 1, 1, call_id="batched-read")
+        result = self.store.codex_read(
+            context, str(large_repo / "generated-0.py"), 1, 1,
+            call_id="batched-read",
+        )
 
         statements = []
         self.store.conn.set_trace_callback(statements.append)
         try:
             summary = self.store.list_projects()
-            tree = self.store.get_project_tree(self.project["id"])
+            tree = self.store.get_project_tree(project["id"], [result["session_id"]])
         finally:
             self.store.conn.set_trace_callback(None)
 
-        range_queries = [
+        dynamic_range_queries = [
             statement
             for statement in statements
-            if "FROM ac_covered_ranges AS ranges" in statement
+            if "FROM ac_covered_ranges" in statement
         ]
-        read_count_queries = [
+        event_queries = [
             statement
             for statement in statements
-            if "FROM ac_read_events AS events" in statement
+            if "FROM ac_read_events" in statement
         ]
-        self.assertEqual(len(range_queries), 2)
-        self.assertEqual(len(read_count_queries), 1)
-        self.assertEqual(summary["projects"][0]["covered_lines"], 1)
+        self.assertEqual(dynamic_range_queries, [])
+        self.assertEqual(event_queries, [])
+        project_summary = next(
+            item for item in summary["projects"] if item["id"] == project["id"]
+        )
+        self.assertEqual(project_summary["covered_lines"], 1)
+        self.assertEqual(project_summary["total_lines"], 100)
         self.assertEqual(tree["covered_lines"], 1)
+        self.assertEqual(tree["total_files"], 100)
+
+    def test_project_summary_and_session_summaries_use_materialized_data(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        for index in range(12):
+            context = AgentContext("claude-code", f"session-{index}")
+            self.store.prepare_read(context, f"call-{index}", path, 1, 2)
+            self.store.complete_read(context, f"call-{index}", path, True)
+
+        statements = []
+        self.store.conn.set_trace_callback(statements.append)
+        try:
+            summary = self.store.get_project_coverage_summary(self.project["id"])
+            detail = self.store.get_project(self.project["id"])
+        finally:
+            self.store.conn.set_trace_callback(None)
+
+        self.assertEqual(summary["selection"], "all")
+        self.assertNotIn("tree", summary)
+        self.assertEqual(summary["covered_lines"], 2)
+        self.assertEqual(detail["session_count"], 12)
+        self.assertEqual(len(detail["sessions"]), 12)
+        self.assertTrue(
+            all(item["covered_lines"] == 2 for item in detail["sessions"])
+        )
+        session_coverage_queries = [
+            statement
+            for statement in statements
+            if "LEFT JOIN ac_covered_ranges AS ranges" in statement
+        ]
+        self.assertEqual(len(session_coverage_queries), 1)
+        one_session = self.store.get_project_coverage_summary(
+            self.project["id"], [detail["sessions"][0]["id"]]
+        )
+        self.assertEqual(one_session["selection"], "sessions")
+        self.assertEqual(one_session["covered_lines"], 2)
+        self.assertNotIn("tree", one_session)
+        empty = self.store.get_project_coverage_summary(self.project["id"], [])
+        self.assertEqual(empty["selected_session_ids"], [])
+        self.assertEqual(empty["covered_lines"], 0)
+        self.assertEqual(empty["total_lines"], 4)
+
+    def test_existing_events_are_backfilled_into_materialized_tables(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        context = AgentContext("opencode", "legacy-session")
+        self.store.prepare_read(context, "legacy-1", path, 1, 2)
+        self.store.complete_read(context, "legacy-1", path, True)
+        self.store.prepare_read(context, "legacy-2", path, 2, 4)
+        self.store.complete_read(context, "legacy-2", path, True)
+        db_path = self.store.db_path
+        self.store.close()
+
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                """
+                UPDATE ac_read_events
+                SET adjusted_start_line = -100
+                WHERE call_id = 'legacy-1'
+                """
+            )
+            connection.execute(
+                """
+                UPDATE ac_read_events
+                SET adjusted_end_line = 999
+                WHERE call_id = 'legacy-2'
+                """
+            )
+            connection.execute("DELETE FROM ac_covered_ranges")
+            connection.execute("DELETE FROM ac_project_read_deltas")
+            connection.execute("DELETE FROM ac_project_covered_ranges")
+            connection.execute("DELETE FROM ac_project_file_stats")
+            connection.execute("DELETE FROM ac_project_stats")
+            connection.execute(
+                "UPDATE ac_metadata SET value = 'legacy' "
+                "WHERE key = 'materialized_coverage_version'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.store = AuditCovStore(db_path)
+        summary = self.store.get_project_coverage_summary(self.project["id"])
+        view = self.store.get_project_file_view(
+            self.project["id"], None, "src/a.py"
+        )
+        self.assertEqual(summary["covered_lines"], 4)
+        self.assertEqual(summary["covered_files"], 1)
+        self.assertEqual(summary["session_count"], 1)
+        self.assertEqual(
+            [line["read_count"] for line in view["lines"]], [1, 2, 1, 1]
+        )
+        self.assertEqual(view["max_read_count"], 2)
+        self.assertLessEqual(summary["covered_lines"], summary["total_lines"])
+        self.assertLessEqual(summary["percent"], 100.0)
+
+        self.store.close()
+        self.store = AuditCovStore(db_path)
+        reopened = self.store.get_project_coverage_summary(self.project["id"])
+        self.assertEqual(reopened["covered_lines"], 4)
+        self.assertEqual(reopened["percent"], 100.0)
 
     def test_parent_and_child_sessions_have_independent_coverage(self) -> None:
         path = str(self.repo / "src" / "a.py")
@@ -432,6 +611,57 @@ class StoreTests(unittest.TestCase):
             list(executor.map(complete, ["call-1", "call-2"]))
         detail = self.store.get_project(self.project["id"])
         self.assertEqual(detail["covered_lines"], 4)
+
+    def test_parallel_duplicate_completion_is_counted_exactly_once(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        context = AgentContext("opencode", "parallel-duplicate-session")
+        self.store.prepare_read(context, "same-call", path, 1, 4)
+
+        def complete(_index: int) -> bool:
+            worker = AuditCovStore(self.root / "auditcov.sqlite3")
+            try:
+                return bool(
+                    worker.complete_read(
+                        context, "same-call", path, True
+                    )["counted"]
+                )
+            finally:
+                worker.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            counted = list(executor.map(complete, range(2)))
+
+        self.assertEqual(sum(counted), 1)
+        view = self.store.get_project_file_view(
+            self.project["id"], None, "src/a.py"
+        )
+        self.assertEqual(view["max_read_count"], 1)
+        self.assertEqual(
+            [line["read_count"] for line in view["lines"]], [1, 1, 1, 1]
+        )
+        self.assertEqual(list(self.store.conn.execute("PRAGMA foreign_key_check")), [])
+
+    def test_existing_session_does_not_recount_all_project_sessions(self) -> None:
+        path = str(self.repo / "src" / "a.py")
+        context = AgentContext("claude-code", "stable-session")
+        self.store.prepare_read(context, "first", path, 1, 1)
+
+        statements = []
+        self.store.conn.set_trace_callback(statements.append)
+        try:
+            self.store.prepare_read(context, "second", path, 2, 2)
+        finally:
+            self.store.conn.set_trace_callback(None)
+
+        self.assertFalse(
+            any(
+                "SELECT COUNT(*) FROM ac_sessions" in statement
+                for statement in statements
+            )
+        )
+        self.assertEqual(
+            self.store.get_project(self.project["id"])["session_count"], 1
+        )
 
     def test_codex_read_returns_content_and_server_owns_coverage(self) -> None:
         context = AgentContext("codex", "thread-1", "turn-1")

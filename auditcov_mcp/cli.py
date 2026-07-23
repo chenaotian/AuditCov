@@ -79,6 +79,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Select no sessions and report an empty coverage numerator.",
     )
+    coverage.add_argument(
+        "--tree",
+        action="store_true",
+        help=(
+            "Fetch the complete file tree. Without this option, coverage uses the "
+            "lightweight summary; all-session totals use materialized data."
+        ),
+    )
     add_output_argument(coverage)
     add_connection_arguments(coverage)
     coverage.set_defaults(handler=show_coverage)
@@ -206,15 +214,22 @@ def show_coverage(args: argparse.Namespace) -> dict[str, Any]:
         params["selection"] = "none"
     elif args.session_ids:
         params["session_id"] = args.session_ids
-    payload = client_for(args).get(
-        f"/api/projects/{args.project_id}/coverage",
-        params,
+    dynamic = bool(args.tree)
+    endpoint = (
+        f"/api/projects/{args.project_id}/coverage"
+        if dynamic
+        else f"/api/projects/{args.project_id}/coverage-summary"
     )
+    payload = client_for(args).get(endpoint, params)
     if args.json:
         print_json(payload)
     else:
-        selected = payload.get("selected_session_ids", [])
-        selected_label = ", ".join(str(item) for item in selected) or "none"
+        selected = payload.get("selected_session_ids")
+        selected_label = (
+            "all"
+            if payload.get("selection") == "all" and selected is None
+            else ", ".join(str(item) for item in (selected or [])) or "none"
+        )
         print(f"Project {payload['id']}: {payload['name']}")
         print(f"Selected sessions: {selected_label}")
         print(

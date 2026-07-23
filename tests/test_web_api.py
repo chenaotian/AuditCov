@@ -105,6 +105,31 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(file_view["max_read_count"], 2)
 
+        _, summary = self.request(
+            "GET", f"/api/projects/{project['id']}/coverage-summary"
+        )
+        self.assertEqual(summary["selection"], "all")
+        self.assertEqual(summary["covered_lines"], 3)
+        self.assertEqual(summary["covered_files"], 1)
+        self.assertNotIn("tree", summary)
+
+        _, selected_summary = self.request(
+            "GET",
+            f"/api/projects/{project['id']}/coverage-summary"
+            f"?session_id={before['session_id']}",
+        )
+        self.assertEqual(selected_summary["selected_session_ids"], [before["session_id"]])
+        self.assertEqual(selected_summary["covered_lines"], 3)
+        self.assertNotIn("tree", selected_summary)
+
+        _, empty_summary = self.request(
+            "GET",
+            f"/api/projects/{project['id']}/coverage-summary?selection=none",
+        )
+        self.assertEqual(empty_summary["selected_session_ids"], [])
+        self.assertEqual(empty_summary["covered_lines"], 0)
+        self.assertEqual(empty_summary["total_lines"], 3)
+
     def test_delete_project_returns_json_and_removes_it_from_list(self) -> None:
         _, project = self.request(
             "POST", "/api/projects", {"project_root": str(self.repo), "name": "Repo"}

@@ -35,6 +35,9 @@ IGNORED_DIR_NAMES = {
     "vendor", "venv",
 }
 
+MATERIALIZED_COVERAGE_VERSION = "1"
+SQLITE_IN_CHUNK_SIZE = 800
+
 
 class AuditCovError(Exception):
     """Expected API or tool-level error."""
@@ -121,6 +124,7 @@ class AuditCovStore:
                     for item in files
                 ],
             )
+            self._initialize_project_materialized(project_id)
         return self.get_project(project_id)
 
     def delete_project(self, project_id: int) -> dict[str, Any]:
@@ -145,27 +149,55 @@ class AuditCovStore:
             raise
 
     def list_projects(self) -> dict[str, Any]:
-        projects = []
-        for row in self.conn.execute("SELECT * FROM ac_projects ORDER BY created_at DESC"):
-            project_id = int(row["id"])
-            session_ids = self._all_session_ids(project_id)
-            projects.append(
-                {
-                    **self._project_values(row),
-                    "session_count": len(session_ids),
-                    **self._aggregate_coverage(project_id, session_ids),
-                }
+        projects = [
+            self._project_values(row)
+            for row in self.conn.execute(
+                """
+                SELECT projects.*, stats.total_files, stats.total_lines,
+                       stats.session_count, stats.covered_files, stats.covered_lines
+                FROM ac_projects AS projects
+                JOIN ac_project_stats AS stats ON stats.project_id = projects.id
+                ORDER BY projects.created_at DESC
+                """
             )
+        ]
         return {"db_path": str(self.db_path), "projects": projects}
 
     def get_project(self, project_id: int) -> dict[str, Any]:
-        project = self._require_project(project_id)
-        session_ids = self._all_session_ids(project_id)
+        project = self._project_with_stats(project_id)
         return {
             **self._project_values(project),
-            "sessions": [self._session_summary(row) for row in self._sessions(project_id)],
-            "session_count": len(session_ids),
-            **self._aggregate_coverage(project_id, session_ids),
+            "sessions": self._session_summaries(project_id, project),
+        }
+
+    def get_project_coverage_summary(
+        self, project_id: int, session_ids: list[int] | None = None
+    ) -> dict[str, Any]:
+        """Return a lightweight summary, using the cache for an all-session selection."""
+        project = self._project_with_stats(project_id)
+        if session_ids is None:
+            return {
+                **self._project_values(project),
+                "selection": "all",
+            }
+        selected = self._validated_session_ids(project_id, session_ids)
+        all_sessions = self._selection_is_all(project_id, selected)
+        payload = self._project_values(project)
+        if all_sessions:
+            return {
+                **payload,
+                "selection": "all",
+                "selected_session_ids": selected,
+            }
+        ranges_by_path = self._aggregate_ranges_by_path(project_id, selected)
+        covered_lines = sum(range_size(ranges) for ranges in ranges_by_path.values())
+        return {
+            **payload,
+            "selection": "sessions",
+            "selected_session_ids": selected,
+            "covered_lines": covered_lines,
+            "percent": percent(covered_lines, int(project["total_lines"])),
+            "covered_files": len(ranges_by_path),
         }
 
     # Hook ingestion ----------------------------------------------------
@@ -218,7 +250,10 @@ class AuditCovStore:
                     adjusted_start_line = excluded.adjusted_start_line,
                     adjusted_end_line = excluded.adjusted_end_line,
                     status = 'attempted',
+                    snapshot_tracked = 1,
+                    observed_content_sha256 = NULL,
                     completed_at = NULL
+                WHERE ac_read_events.status NOT IN ('succeeded', 'failed')
                 """,
                 (
                     session_id,
@@ -254,6 +289,8 @@ class AuditCovStore:
         end_line: int | None = None,
     ) -> dict[str, Any]:
         validate_context(context)
+        if not call_id:
+            raise AuditCovError("call_id must not be empty")
         match = self._match_target_file(file_path)
         if match is None:
             return {"tracked": False, "counted": False}
@@ -268,6 +305,19 @@ class AuditCovStore:
                 "SELECT * FROM ac_read_events WHERE session_id = ? AND call_id = ?",
                 (session_id, call_id),
             ).fetchone()
+            if event is not None and str(event["status"]) in {"succeeded", "failed"}:
+                self.conn.commit()
+                return {
+                    "tracked": True,
+                    "counted": False,
+                    "duplicate": True,
+                    "project_id": int(project["id"]),
+                    "session_id": session_id,
+                    "path": str(event["path"]),
+                    "start_line": int(event["adjusted_start_line"]),
+                    "end_line": int(event["adjusted_end_line"]),
+                }
+            old_contribution = self._event_contribution(event)
             if event is not None:
                 returned_start = int(event["adjusted_start_line"])
                 returned_end = int(event["adjusted_end_line"])
@@ -299,10 +349,21 @@ class AuditCovStore:
                 self.conn.execute(
                     """
                     UPDATE ac_read_events
-                    SET status = ?, adjusted_start_line = ?, adjusted_end_line = ?, completed_at = ?
+                    SET path = ?,
+                        requested_start_line = ?,
+                        requested_end_line = ?,
+                        status = ?,
+                        snapshot_tracked = 1,
+                        observed_content_sha256 = NULL,
+                        adjusted_start_line = ?,
+                        adjusted_end_line = ?,
+                        completed_at = ?
                     WHERE session_id = ? AND call_id = ?
                     """,
                     (
+                        file_row["path"],
+                        returned_start,
+                        returned_end,
                         "succeeded" if counted else "failed",
                         returned_start,
                         returned_end,
@@ -311,10 +372,16 @@ class AuditCovStore:
                         call_id,
                     ),
                 )
-            if counted:
-                self._merge_covered_range(
-                    session_id, str(file_row["path"]), returned_start, returned_end
-                )
+            new_event = self.conn.execute(
+                "SELECT * FROM ac_read_events WHERE session_id = ? AND call_id = ?",
+                (session_id, call_id),
+            ).fetchone()
+            self._update_materialized_for_event_change(
+                int(project["id"]),
+                session_id,
+                old_contribution,
+                self._event_contribution(new_event),
+            )
             self.conn.execute(
                 "UPDATE ac_sessions SET updated_at = ? WHERE id = ?", (now, session_id)
             )
@@ -451,30 +518,67 @@ class AuditCovStore:
     def get_project_tree(
         self, project_id: int, session_ids: list[int] | None = None
     ) -> dict[str, Any]:
-        project = self._require_project(project_id)
+        project = self._project_with_stats(project_id)
         selected = self._validated_session_ids(project_id, session_ids)
-        ranges_by_path = self._aggregate_ranges_by_path(project_id, selected)
-        max_read_counts = self._max_read_counts_by_path(project_id, selected)
+        all_sessions = (
+            session_ids is None or self._selection_is_all(project_id, selected)
+        )
+        ranges_by_path = (
+            {}
+            if all_sessions
+            else self._aggregate_ranges_by_path(project_id, selected)
+        )
+        max_read_counts = (
+            {}
+            if all_sessions
+            else self._max_read_counts_by_path(project_id, selected)
+        )
         files = []
-        for row in self.conn.execute(
-            "SELECT * FROM ac_files WHERE project_id = ? ORDER BY path", (project_id,)
-        ):
+        rows = self.conn.execute(
+            """
+            SELECT files.*,
+                   COALESCE(stats.covered_lines, 0) AS cached_covered_lines,
+                   COALESCE(stats.max_read_count, 0) AS cached_max_read_count
+            FROM ac_files AS files
+            LEFT JOIN ac_project_file_stats AS stats
+              ON stats.project_id = files.project_id AND stats.path = files.path
+            WHERE files.project_id = ?
+            ORDER BY files.path
+            """,
+            (project_id,),
+        )
+        for row in rows:
             path = str(row["path"])
-            ranges = ranges_by_path.get(path, [])
             total = int(row["line_count"])
-            covered = range_size(ranges)
+            covered = (
+                int(row["cached_covered_lines"])
+                if all_sessions
+                else range_size(ranges_by_path.get(path, []))
+            )
+            max_read_count = (
+                int(row["cached_max_read_count"])
+                if all_sessions
+                else max_read_counts.get(path, 0)
+            )
             files.append(
-                file_coverage(
-                    path,
-                    total,
-                    covered,
-                    max_read_counts.get(path, 0),
-                )
+                file_coverage(path, total, covered, max_read_count)
             )
         return {
             **self._project_values(project),
             "selected_session_ids": selected,
-            **coverage_from_files(files),
+            **(
+                {
+                    "covered_lines": int(project["covered_lines"]),
+                    "total_lines": int(project["total_lines"]),
+                    "percent": percent(
+                        int(project["covered_lines"]), int(project["total_lines"])
+                    ),
+                    "covered_files": int(project["covered_files"]),
+                    "total_files": int(project["total_files"]),
+                }
+                if all_sessions
+                else coverage_from_files(files)
+            ),
             "tree": build_tree(files, str(project["name"])),
         }
 
@@ -483,12 +587,23 @@ class AuditCovStore:
     ) -> dict[str, Any]:
         project = self._require_project(project_id)
         selected = self._validated_session_ids(project_id, session_ids)
+        all_sessions = (
+            session_ids is None or self._selection_is_all(project_id, selected)
+        )
         rel_path = self._normalize_project_path(project, path)
         file_row = self._file(project_id, rel_path)
         if file_row is None:
             raise AuditCovError(f"path is not part of the project snapshot: {path}")
-        ranges = self._aggregate_ranges(selected, rel_path)
-        read_count_changes = self._read_count_changes(selected, rel_path)
+        ranges = (
+            self._project_ranges(project_id, rel_path)
+            if all_sessions
+            else self._aggregate_ranges(selected, rel_path)
+        )
+        read_count_changes = (
+            self._project_read_count_changes(project_id, rel_path)
+            if all_sessions
+            else self._read_count_changes(selected, rel_path)
+        )
         total = int(file_row["line_count"])
         abs_path = Path(project["project_root"]) / Path(rel_path)
         digest = hashlib.sha256()
@@ -597,10 +712,55 @@ class AuditCovStore:
                     PRIMARY KEY(session_id, path, start_line, end_line),
                     FOREIGN KEY(session_id) REFERENCES ac_sessions(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS ac_project_stats(
+                    project_id INTEGER PRIMARY KEY,
+                    total_files INTEGER NOT NULL,
+                    total_lines INTEGER NOT NULL,
+                    session_count INTEGER NOT NULL,
+                    covered_files INTEGER NOT NULL,
+                    covered_lines INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES ac_projects(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS ac_project_file_stats(
+                    project_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    covered_lines INTEGER NOT NULL,
+                    max_read_count INTEGER NOT NULL,
+                    PRIMARY KEY(project_id, path),
+                    FOREIGN KEY(project_id, path)
+                        REFERENCES ac_files(project_id, path) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS ac_project_covered_ranges(
+                    project_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    PRIMARY KEY(project_id, path, start_line, end_line),
+                    FOREIGN KEY(project_id, path)
+                        REFERENCES ac_files(project_id, path) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS ac_project_read_deltas(
+                    project_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    line_number INTEGER NOT NULL,
+                    delta INTEGER NOT NULL,
+                    PRIMARY KEY(project_id, path, line_number),
+                    FOREIGN KEY(project_id, path)
+                        REFERENCES ac_files(project_id, path) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS ac_metadata(
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS ac_sessions_identity
                     ON ac_sessions(agent_type, agent_session_id);
                 CREATE INDEX IF NOT EXISTS ac_ranges_path
                     ON ac_covered_ranges(session_id, path);
+                CREATE INDEX IF NOT EXISTS ac_project_ranges_path
+                    ON ac_project_covered_ranges(project_id, path);
+                CREATE INDEX IF NOT EXISTS ac_project_read_deltas_path
+                    ON ac_project_read_deltas(project_id, path, line_number);
                 """
             )
             columns = {
@@ -639,6 +799,409 @@ class AuditCovStore:
                 WHERE status = 'succeeded' AND snapshot_tracked = 1
                 """
             )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ac_read_events_counted_path
+                ON ac_read_events(
+                    path, session_id, adjusted_start_line, adjusted_end_line
+                )
+                WHERE status = 'succeeded' AND snapshot_tracked = 1
+                """
+            )
+            version = self.conn.execute(
+                "SELECT value FROM ac_metadata WHERE key = 'materialized_coverage_version'"
+            ).fetchone()
+            if version is None or str(version["value"]) != MATERIALIZED_COVERAGE_VERSION:
+                # Two first requests can open the same legacy database concurrently.
+                # Serialize the migration, then re-check after acquiring the write
+                # lock so the second opener does not repeat an expensive rebuild.
+                self.conn.execute("BEGIN IMMEDIATE")
+                version = self.conn.execute(
+                    """
+                    SELECT value FROM ac_metadata
+                    WHERE key = 'materialized_coverage_version'
+                    """
+                ).fetchone()
+                if (
+                    version is None
+                    or str(version["value"]) != MATERIALIZED_COVERAGE_VERSION
+                ):
+                    self._rebuild_all_materialized()
+                    self.conn.execute(
+                        """
+                        INSERT INTO ac_metadata(key, value)
+                        VALUES ('materialized_coverage_version', ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        (MATERIALIZED_COVERAGE_VERSION,),
+                    )
+
+    def _initialize_project_materialized(self, project_id: int) -> None:
+        totals = self.conn.execute(
+            """
+            SELECT COUNT(*) AS total_files,
+                   COALESCE(SUM(line_count), 0) AS total_lines
+            FROM ac_files WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+        now = utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO ac_project_stats(
+                project_id, total_files, total_lines, session_count,
+                covered_files, covered_lines, updated_at
+            ) VALUES (?, ?, ?, 0, 0, 0, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                total_files = excluded.total_files,
+                total_lines = excluded.total_lines,
+                session_count = 0,
+                covered_files = 0,
+                covered_lines = 0,
+                updated_at = excluded.updated_at
+            """,
+            (
+                project_id,
+                int(totals["total_files"]),
+                int(totals["total_lines"]),
+                now,
+            ),
+        )
+        self.conn.execute(
+            "DELETE FROM ac_project_file_stats WHERE project_id = ?", (project_id,)
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO ac_project_file_stats(
+                project_id, path, covered_lines, max_read_count
+            ) VALUES (?, ?, 0, 0)
+            """,
+            [
+                (project_id, str(row["path"]))
+                for row in self.conn.execute(
+                    "SELECT path FROM ac_files WHERE project_id = ?", (project_id,)
+                )
+            ],
+        )
+
+    def _rebuild_all_materialized(self) -> None:
+        """One-time migration/backfill from authoritative sessions and read events."""
+        session_paths = [
+            (int(row["session_id"]), str(row["path"]))
+            for row in self.conn.execute(
+                """
+                SELECT DISTINCT session_id, path
+                FROM ac_read_events
+                WHERE status = 'succeeded' AND snapshot_tracked = 1
+                """
+            )
+        ]
+        self.conn.execute("DELETE FROM ac_covered_ranges")
+        for session_id, path in session_paths:
+            self._rebuild_session_covered_path(session_id, path)
+        self.conn.execute("DELETE FROM ac_project_read_deltas")
+        self.conn.execute("DELETE FROM ac_project_covered_ranges")
+        self.conn.execute("DELETE FROM ac_project_file_stats")
+        self.conn.execute("DELETE FROM ac_project_stats")
+        for project in self.conn.execute("SELECT id FROM ac_projects ORDER BY id"):
+            project_id = int(project["id"])
+            self._initialize_project_materialized(project_id)
+            self.conn.execute(
+                """
+                UPDATE ac_project_stats
+                SET session_count = (
+                    SELECT COUNT(*) FROM ac_sessions WHERE project_id = ?
+                )
+                WHERE project_id = ?
+                """,
+                (project_id, project_id),
+            )
+            paths = [
+                str(row["path"])
+                for row in self.conn.execute(
+                    """
+                    SELECT DISTINCT events.path
+                    FROM ac_read_events AS events
+                    JOIN ac_sessions AS sessions ON sessions.id = events.session_id
+                    JOIN ac_files AS files
+                      ON files.project_id = sessions.project_id
+                     AND files.path = events.path
+                    WHERE sessions.project_id = ?
+                      AND events.status = 'succeeded'
+                      AND events.snapshot_tracked = 1
+                    """,
+                    (project_id,),
+                )
+            ]
+            for path in paths:
+                self._rebuild_project_covered_path(project_id, path)
+                self._rebuild_project_read_deltas(project_id, path)
+
+    @staticmethod
+    def _event_contribution(row: sqlite3.Row | None) -> tuple[str, int, int] | None:
+        if (
+            row is None
+            or str(row["status"]) != "succeeded"
+            or not bool(row["snapshot_tracked"])
+        ):
+            return None
+        start = int(row["adjusted_start_line"])
+        end = int(row["adjusted_end_line"])
+        if start < 1 or end < start:
+            return None
+        return str(row["path"]), start, end
+
+    def _update_materialized_for_event_change(
+        self,
+        project_id: int,
+        session_id: int,
+        old: tuple[str, int, int] | None,
+        new: tuple[str, int, int] | None,
+    ) -> None:
+        if old == new:
+            return
+        if old is None and new is not None:
+            path, start, end = new
+            self._merge_covered_range(session_id, path, start, end)
+            self._merge_project_covered_range(project_id, path, start, end)
+            self._adjust_project_read_deltas(project_id, path, start, end, 1)
+            self._refresh_project_file_peak(project_id, path)
+            return
+
+        affected_paths: set[str] = set()
+        if old is not None:
+            old_path, old_start, old_end = old
+            affected_paths.add(old_path)
+            self._adjust_project_read_deltas(
+                project_id, old_path, old_start, old_end, -1
+            )
+        if new is not None:
+            new_path, new_start, new_end = new
+            affected_paths.add(new_path)
+            self._adjust_project_read_deltas(
+                project_id, new_path, new_start, new_end, 1
+            )
+        for path in affected_paths:
+            self._rebuild_session_covered_path(session_id, path)
+            self._rebuild_project_covered_path(project_id, path)
+            self._refresh_project_file_peak(project_id, path)
+
+    def _merge_project_covered_range(
+        self, project_id: int, path: str, start_line: int, end_line: int
+    ) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT start_line, end_line FROM ac_project_covered_ranges
+            WHERE project_id = ? AND path = ?
+            """,
+            (project_id, path),
+        )
+        ranges = [(int(row["start_line"]), int(row["end_line"])) for row in rows]
+        ranges.append((start_line, end_line))
+        self._replace_project_covered_ranges(project_id, path, merge_ranges(ranges))
+
+    def _replace_project_covered_ranges(
+        self, project_id: int, path: str, ranges: list[tuple[int, int]]
+    ) -> None:
+        prior = self.conn.execute(
+            """
+            SELECT covered_lines FROM ac_project_file_stats
+            WHERE project_id = ? AND path = ?
+            """,
+            (project_id, path),
+        ).fetchone()
+        if prior is None:
+            return
+        old_covered = int(prior["covered_lines"])
+        new_covered = range_size(ranges)
+        self.conn.execute(
+            "DELETE FROM ac_project_covered_ranges WHERE project_id = ? AND path = ?",
+            (project_id, path),
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO ac_project_covered_ranges(
+                project_id, path, start_line, end_line
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [(project_id, path, start, end) for start, end in ranges],
+        )
+        self.conn.execute(
+            """
+            UPDATE ac_project_file_stats SET covered_lines = ?
+            WHERE project_id = ? AND path = ?
+            """,
+            (new_covered, project_id, path),
+        )
+        self.conn.execute(
+            """
+            UPDATE ac_project_stats
+            SET covered_lines = covered_lines + ?,
+                covered_files = covered_files + ?,
+                updated_at = ?
+            WHERE project_id = ?
+            """,
+            (
+                new_covered - old_covered,
+                int(new_covered > 0) - int(old_covered > 0),
+                utc_now(),
+                project_id,
+            ),
+        )
+
+    def _rebuild_session_covered_path(
+        self, session_id: int, path: str
+    ) -> None:
+        ranges = []
+        for row in self.conn.execute(
+            """
+            SELECT events.adjusted_start_line, events.adjusted_end_line,
+                   files.line_count
+            FROM ac_read_events AS events
+            JOIN ac_sessions AS sessions ON sessions.id = events.session_id
+            JOIN ac_files AS files
+              ON files.project_id = sessions.project_id
+             AND files.path = events.path
+            WHERE events.session_id = ? AND events.path = ?
+              AND events.status = 'succeeded'
+              AND events.snapshot_tracked = 1
+            ORDER BY events.adjusted_start_line, events.adjusted_end_line
+            """,
+            (session_id, path),
+        ):
+            start = max(1, int(row["adjusted_start_line"]))
+            end = min(int(row["line_count"]), int(row["adjusted_end_line"]))
+            if start <= end:
+                ranges.append((start, end))
+        self.conn.execute(
+            "DELETE FROM ac_covered_ranges WHERE session_id = ? AND path = ?",
+            (session_id, path),
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO ac_covered_ranges(session_id, path, start_line, end_line)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (session_id, path, start, end)
+                for start, end in merge_ranges(ranges)
+            ],
+        )
+
+    def _rebuild_project_covered_path(self, project_id: int, path: str) -> None:
+        ranges = []
+        for row in self.conn.execute(
+            """
+            SELECT events.adjusted_start_line, events.adjusted_end_line,
+                   files.line_count
+            FROM ac_read_events AS events
+            JOIN ac_sessions AS sessions ON sessions.id = events.session_id
+            JOIN ac_files AS files
+              ON files.project_id = sessions.project_id
+             AND files.path = events.path
+            WHERE sessions.project_id = ? AND events.path = ?
+              AND events.status = 'succeeded'
+              AND events.snapshot_tracked = 1
+            ORDER BY events.adjusted_start_line, events.adjusted_end_line
+            """,
+            (project_id, path),
+        ):
+            start = max(1, int(row["adjusted_start_line"]))
+            end = min(int(row["line_count"]), int(row["adjusted_end_line"]))
+            if start <= end:
+                ranges.append((start, end))
+        self._replace_project_covered_ranges(project_id, path, merge_ranges(ranges))
+
+    def _adjust_project_read_deltas(
+        self,
+        project_id: int,
+        path: str,
+        start_line: int,
+        end_line: int,
+        amount: int,
+    ) -> None:
+        for line_number, delta in (
+            (start_line, amount),
+            (end_line + 1, -amount),
+        ):
+            self.conn.execute(
+                """
+                INSERT INTO ac_project_read_deltas(
+                    project_id, path, line_number, delta
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(project_id, path, line_number)
+                DO UPDATE SET delta = delta + excluded.delta
+                """,
+                (project_id, path, line_number, delta),
+            )
+        self.conn.execute(
+            """
+            DELETE FROM ac_project_read_deltas
+            WHERE project_id = ? AND path = ? AND delta = 0
+            """,
+            (project_id, path),
+        )
+
+    def _rebuild_project_read_deltas(self, project_id: int, path: str) -> None:
+        self.conn.execute(
+            "DELETE FROM ac_project_read_deltas WHERE project_id = ? AND path = ?",
+            (project_id, path),
+        )
+        changes: dict[int, int] = {}
+        for row in self.conn.execute(
+            """
+            SELECT events.adjusted_start_line, events.adjusted_end_line,
+                   files.line_count
+            FROM ac_read_events AS events
+            JOIN ac_sessions AS sessions ON sessions.id = events.session_id
+            JOIN ac_files AS files
+              ON files.project_id = sessions.project_id
+             AND files.path = events.path
+            WHERE sessions.project_id = ? AND events.path = ?
+              AND events.status = 'succeeded'
+              AND events.snapshot_tracked = 1
+            """,
+            (project_id, path),
+        ):
+            start = max(1, int(row["adjusted_start_line"]))
+            end = min(int(row["line_count"]), int(row["adjusted_end_line"]))
+            if start <= end:
+                changes[start] = changes.get(start, 0) + 1
+                changes[end + 1] = changes.get(end + 1, 0) - 1
+        self.conn.executemany(
+            """
+            INSERT INTO ac_project_read_deltas(
+                project_id, path, line_number, delta
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (project_id, path, line_number, delta)
+                for line_number, delta in changes.items()
+                if delta
+            ],
+        )
+        self._refresh_project_file_peak(project_id, path)
+
+    def _refresh_project_file_peak(self, project_id: int, path: str) -> None:
+        count = 0
+        maximum = 0
+        for row in self.conn.execute(
+            """
+            SELECT delta FROM ac_project_read_deltas
+            WHERE project_id = ? AND path = ?
+            ORDER BY line_number
+            """,
+            (project_id, path),
+        ):
+            count += int(row["delta"])
+            maximum = max(maximum, count)
+        self.conn.execute(
+            """
+            UPDATE ac_project_file_stats SET max_read_count = ?
+            WHERE project_id = ? AND path = ?
+            """,
+            (maximum, project_id, path),
+        )
 
     def _snapshot_files(self, root: Path) -> list[FileSnapshot]:
         snapshots = []
@@ -710,6 +1273,17 @@ class AuditCovStore:
         counted = snapshot_tracked and requested_start <= actual_end
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            existing = self.conn.execute(
+                "SELECT * FROM ac_read_events WHERE session_id = ? AND call_id = ?",
+                (session_id, call_id),
+            ).fetchone()
+            if existing is not None and str(existing["status"]) in {
+                "succeeded",
+                "failed",
+            }:
+                self.conn.commit()
+                return session_id, False
+            old_contribution = self._event_contribution(existing)
             self.conn.execute(
                 """
                 INSERT INTO ac_read_events(
@@ -742,8 +1316,16 @@ class AuditCovStore:
                     now,
                 ),
             )
-            if counted:
-                self._merge_covered_range(session_id, path, requested_start, actual_end)
+            new_event = self.conn.execute(
+                "SELECT * FROM ac_read_events WHERE session_id = ? AND call_id = ?",
+                (session_id, call_id),
+            ).fetchone()
+            self._update_materialized_for_event_change(
+                project_id,
+                session_id,
+                old_contribution,
+                self._event_contribution(new_event),
+            )
             self.conn.execute(
                 "UPDATE ac_sessions SET updated_at = ? WHERE id = ?", (now, session_id)
             )
@@ -761,33 +1343,49 @@ class AuditCovStore:
             raise AuditCovError(f"project does not exist: {project_id}")
         return row
 
+    def _project_with_stats(self, project_id: int) -> sqlite3.Row:
+        row = self.conn.execute(
+            """
+            SELECT projects.*, stats.total_files, stats.total_lines,
+                   stats.session_count, stats.covered_files, stats.covered_lines
+            FROM ac_projects AS projects
+            JOIN ac_project_stats AS stats ON stats.project_id = projects.id
+            WHERE projects.id = ?
+            """,
+            (positive_int(project_id, "project_id"),),
+        ).fetchone()
+        if row is None:
+            self._require_project(project_id)
+            raise AuditCovError(f"coverage cache is missing for project: {project_id}")
+        return row
+
     def _file(self, project_id: int, path: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM ac_files WHERE project_id = ? AND path = ?", (project_id, path)
         ).fetchone()
 
     def _project_values(self, row: sqlite3.Row) -> dict[str, Any]:
-        counts = self.conn.execute(
-            "SELECT COUNT(*) AS files, COALESCE(SUM(line_count), 0) AS lines "
-            "FROM ac_files WHERE project_id = ?",
-            (row["id"],),
-        ).fetchone()
         return {
             "id": int(row["id"]),
             "name": row["name"],
             "project_root": row["project_root"],
             "snapshot_id": row["snapshot_id"],
             "created_at": row["created_at"],
-            "total_files": int(counts["files"]),
-            "total_lines": int(counts["lines"]),
+            "session_count": int(row["session_count"]),
+            "covered_lines": int(row["covered_lines"]),
+            "total_lines": int(row["total_lines"]),
+            "percent": percent(int(row["covered_lines"]), int(row["total_lines"])),
+            "covered_files": int(row["covered_files"]),
+            "total_files": int(row["total_files"]),
         }
 
     def _ensure_session(self, project_id: int, context: AgentContext) -> int:
         now = utc_now()
         with self.conn:
             parent_session_id = None
+            inserted_sessions = 0
             if context.parent_agent_session_id is not None:
-                parent_session_id = self._upsert_session_row(
+                parent_session_id, parent_inserted = self._upsert_session_row(
                     project_id,
                     context.agent_type,
                     context.parent_agent_session_id,
@@ -795,7 +1393,8 @@ class AuditCovStore:
                     None,
                     now,
                 )
-            return self._upsert_session_row(
+                inserted_sessions += int(parent_inserted)
+            session_id, session_inserted = self._upsert_session_row(
                 project_id,
                 context.agent_type,
                 context.agent_session_id,
@@ -803,6 +1402,18 @@ class AuditCovStore:
                 parent_session_id,
                 now,
             )
+            inserted_sessions += int(session_inserted)
+            if inserted_sessions:
+                self.conn.execute(
+                    """
+                    UPDATE ac_project_stats
+                    SET session_count = session_count + ?,
+                        updated_at = ?
+                    WHERE project_id = ?
+                    """,
+                    (inserted_sessions, now, project_id),
+                )
+            return session_id
 
     def _upsert_session_row(
         self,
@@ -812,20 +1423,15 @@ class AuditCovStore:
         session_title: str | None,
         parent_session_id: int | None,
         now: str,
-    ) -> int:
-        self.conn.execute(
+    ) -> tuple[int, bool]:
+        cursor = self.conn.execute(
             """
             INSERT INTO ac_sessions(
                 project_id, agent_type, agent_session_id, session_title,
                 parent_session_id, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(project_id, agent_type, agent_session_id)
-            DO UPDATE SET
-                session_title = COALESCE(excluded.session_title, ac_sessions.session_title),
-                parent_session_id = COALESCE(
-                    excluded.parent_session_id, ac_sessions.parent_session_id
-                ),
-                updated_at = excluded.updated_at
+            DO NOTHING
             """,
             (
                 project_id,
@@ -837,6 +1443,27 @@ class AuditCovStore:
                 now,
             ),
         )
+        inserted = cursor.rowcount == 1
+        if not inserted:
+            self.conn.execute(
+                """
+                UPDATE ac_sessions SET
+                    session_title = COALESCE(?, session_title),
+                    parent_session_id = COALESCE(?, parent_session_id),
+                    updated_at = ?
+                WHERE project_id = ?
+                  AND agent_type = ?
+                  AND agent_session_id = ?
+                """,
+                (
+                    session_title,
+                    parent_session_id,
+                    now,
+                    project_id,
+                    agent_type,
+                    agent_session_id,
+                ),
+            )
         row = self.conn.execute(
             """
             SELECT id FROM ac_sessions
@@ -844,7 +1471,7 @@ class AuditCovStore:
             """,
             (project_id, agent_type, agent_session_id),
         ).fetchone()
-        return int(row["id"])
+        return int(row["id"]), inserted
 
     def _sessions(self, project_id: int) -> list[sqlite3.Row]:
         return list(
@@ -854,23 +1481,59 @@ class AuditCovStore:
             )
         )
 
-    def _session_summary(self, row: sqlite3.Row) -> dict[str, Any]:
-        values = self._aggregate_coverage(int(row["project_id"]), [int(row["id"])])
-        return {
-            "id": int(row["id"]),
-            "agent_type": row["agent_type"],
-            "agent_session_id": row["agent_session_id"],
-            "session_title": row["session_title"],
-            "parent_session_id": (
-                int(row["parent_session_id"])
-                if row["parent_session_id"] is not None
-                else None
-            ),
-            "is_subagent": row["parent_session_id"] is not None,
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-            **values,
-        }
+    def _session_summaries(
+        self, project_id: int, project: sqlite3.Row | None = None
+    ) -> list[dict[str, Any]]:
+        """Load all session numerators in one grouped query."""
+        project = project or self._project_with_stats(project_id)
+        total_lines = int(project["total_lines"])
+        total_files = int(project["total_files"])
+        rows = self.conn.execute(
+            """
+            SELECT sessions.*,
+                   COALESCE(SUM(
+                       CASE WHEN files.path IS NOT NULL
+                            THEN ranges.end_line - ranges.start_line + 1
+                            ELSE 0 END
+                   ), 0) AS covered_lines,
+                   COUNT(DISTINCT files.path) AS covered_files
+            FROM ac_sessions AS sessions
+            LEFT JOIN ac_covered_ranges AS ranges
+              ON ranges.session_id = sessions.id
+            LEFT JOIN ac_files AS files
+              ON files.project_id = sessions.project_id
+             AND files.path = ranges.path
+            WHERE sessions.project_id = ?
+            GROUP BY sessions.id
+            ORDER BY sessions.updated_at DESC
+            """,
+            (project_id,),
+        )
+        summaries = []
+        for row in rows:
+            covered_lines = int(row["covered_lines"])
+            summaries.append(
+                {
+                    "id": int(row["id"]),
+                    "agent_type": row["agent_type"],
+                    "agent_session_id": row["agent_session_id"],
+                    "session_title": row["session_title"],
+                    "parent_session_id": (
+                        int(row["parent_session_id"])
+                        if row["parent_session_id"] is not None
+                        else None
+                    ),
+                    "is_subagent": row["parent_session_id"] is not None,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "covered_lines": covered_lines,
+                    "total_lines": total_lines,
+                    "percent": percent(covered_lines, total_lines),
+                    "covered_files": int(row["covered_files"]),
+                    "total_files": total_files,
+                }
+            )
+        return summaries
 
     def _all_session_ids(self, project_id: int) -> list[int]:
         return [int(row["id"]) for row in self._sessions(project_id)]
@@ -890,18 +1553,31 @@ class AuditCovStore:
             selected.append(session_id)
         if not selected:
             return []
-        placeholders = ", ".join("?" for _ in selected)
-        found = {
-            int(row["id"])
-            for row in self.conn.execute(
-                f"SELECT id FROM ac_sessions WHERE project_id = ? AND id IN ({placeholders})",
-                [project_id, *selected],
+        found: set[int] = set()
+        for offset in range(0, len(selected), SQLITE_IN_CHUNK_SIZE):
+            chunk = selected[offset : offset + SQLITE_IN_CHUNK_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            found.update(
+                int(row["id"])
+                for row in self.conn.execute(
+                    f"""
+                    SELECT id FROM ac_sessions
+                    WHERE project_id = ? AND id IN ({placeholders})
+                    """,
+                    [project_id, *chunk],
+                )
             )
-        }
         missing = [str(item) for item in selected if item not in found]
         if missing:
             raise AuditCovError("session does not belong to project: " + ", ".join(missing))
         return selected
+
+    def _selection_is_all(self, project_id: int, session_ids: list[int]) -> bool:
+        row = self.conn.execute(
+            "SELECT session_count FROM ac_project_stats WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return row is not None and len(session_ids) == int(row["session_count"])
 
     def _resolve_agent_project(
         self, context: AgentContext, project_id: int | None
@@ -994,64 +1670,102 @@ class AuditCovStore:
     ) -> dict[str, list[tuple[int, int]]]:
         if not session_ids:
             return {}
-        placeholders = ", ".join("?" for _ in session_ids)
-        rows = self.conn.execute(
-            f"""
-            SELECT ranges.path, ranges.start_line, ranges.end_line
-            FROM ac_covered_ranges AS ranges
-            JOIN ac_files AS files
-              ON files.project_id = ? AND files.path = ranges.path
-            WHERE ranges.session_id IN ({placeholders})
-            ORDER BY ranges.path, ranges.start_line, ranges.end_line
-            """,
-            [project_id, *session_ids],
-        )
         grouped: dict[str, list[tuple[int, int]]] = {}
-        for row in rows:
-            grouped.setdefault(str(row["path"]), []).append(
-                (int(row["start_line"]), int(row["end_line"]))
+        for offset in range(0, len(session_ids), SQLITE_IN_CHUNK_SIZE):
+            chunk = session_ids[offset : offset + SQLITE_IN_CHUNK_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""
+                SELECT ranges.path, ranges.start_line, ranges.end_line
+                FROM ac_covered_ranges AS ranges
+                JOIN ac_files AS files
+                  ON files.project_id = ? AND files.path = ranges.path
+                WHERE ranges.session_id IN ({placeholders})
+                ORDER BY ranges.path, ranges.start_line, ranges.end_line
+                """,
+                [project_id, *chunk],
             )
+            for row in rows:
+                grouped.setdefault(str(row["path"]), []).append(
+                    (int(row["start_line"]), int(row["end_line"]))
+                )
         return {path: merge_ranges(ranges) for path, ranges in grouped.items()}
 
     def _aggregate_ranges(self, session_ids: list[int], path: str) -> list[tuple[int, int]]:
         if not session_ids:
             return []
-        placeholders = ", ".join("?" for _ in session_ids)
-        rows = self.conn.execute(
-            f"""
-            SELECT start_line, end_line FROM ac_covered_ranges
-            WHERE session_id IN ({placeholders}) AND path = ?
-            ORDER BY start_line, end_line
-            """,
-            [*session_ids, path],
-        )
-        return merge_ranges([(int(row["start_line"]), int(row["end_line"])) for row in rows])
+        ranges = []
+        for offset in range(0, len(session_ids), SQLITE_IN_CHUNK_SIZE):
+            chunk = session_ids[offset : offset + SQLITE_IN_CHUNK_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            ranges.extend(
+                (int(row["start_line"]), int(row["end_line"]))
+                for row in self.conn.execute(
+                    f"""
+                    SELECT start_line, end_line FROM ac_covered_ranges
+                    WHERE session_id IN ({placeholders}) AND path = ?
+                    ORDER BY start_line, end_line
+                    """,
+                    [*chunk, path],
+                )
+            )
+        return merge_ranges(ranges)
+
+    def _project_ranges(self, project_id: int, path: str) -> list[tuple[int, int]]:
+        return [
+            (int(row["start_line"]), int(row["end_line"]))
+            for row in self.conn.execute(
+                """
+                SELECT start_line, end_line FROM ac_project_covered_ranges
+                WHERE project_id = ? AND path = ?
+                ORDER BY start_line, end_line
+                """,
+                (project_id, path),
+            )
+        ]
 
     def _read_count_changes(self, session_ids: list[int], path: str) -> dict[int, int]:
         """Build sweep-line deltas for successful reads in exactly these sessions."""
         if not session_ids:
             return {}
-        placeholders = ", ".join("?" for _ in session_ids)
-        rows = self.conn.execute(
-            f"""
-            SELECT adjusted_start_line, adjusted_end_line
-            FROM ac_read_events
-            WHERE session_id IN ({placeholders})
-              AND path = ?
-              AND status = 'succeeded'
-              AND snapshot_tracked = 1
-            """,
-            [*session_ids, path],
-        )
         changes: dict[int, int] = {}
-        for row in rows:
-            start = int(row["adjusted_start_line"])
-            end = int(row["adjusted_end_line"])
-            if start < 1 or end < start:
-                continue
-            changes[start] = changes.get(start, 0) + 1
-            changes[end + 1] = changes.get(end + 1, 0) - 1
+        for offset in range(0, len(session_ids), SQLITE_IN_CHUNK_SIZE):
+            chunk = session_ids[offset : offset + SQLITE_IN_CHUNK_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""
+                SELECT adjusted_start_line, adjusted_end_line
+                FROM ac_read_events
+                WHERE session_id IN ({placeholders})
+                  AND path = ?
+                  AND status = 'succeeded'
+                  AND snapshot_tracked = 1
+                """,
+                [*chunk, path],
+            )
+            for row in rows:
+                start = int(row["adjusted_start_line"])
+                end = int(row["adjusted_end_line"])
+                if start < 1 or end < start:
+                    continue
+                changes[start] = changes.get(start, 0) + 1
+                changes[end + 1] = changes.get(end + 1, 0) - 1
         return changes
+
+    def _project_read_count_changes(
+        self, project_id: int, path: str
+    ) -> dict[int, int]:
+        return {
+            int(row["line_number"]): int(row["delta"])
+            for row in self.conn.execute(
+                """
+                SELECT line_number, delta FROM ac_project_read_deltas
+                WHERE project_id = ? AND path = ?
+                ORDER BY line_number
+                """,
+                (project_id, path),
+            )
+        }
 
     def _max_read_counts_by_path(
         self, project_id: int, session_ids: list[int]
@@ -1059,34 +1773,36 @@ class AuditCovStore:
         """Return each snapshot file's highest per-line successful read count."""
         if not session_ids:
             return {}
-        placeholders = ", ".join("?" for _ in session_ids)
-        rows = self.conn.execute(
-            f"""
-            SELECT
-                events.path,
-                events.adjusted_start_line,
-                events.adjusted_end_line,
-                files.line_count
-            FROM ac_read_events AS events
-            JOIN ac_files AS files
-              ON files.project_id = ? AND files.path = events.path
-            WHERE events.session_id IN ({placeholders})
-              AND events.status = 'succeeded'
-              AND events.snapshot_tracked = 1
-            """,
-            [project_id, *session_ids],
-        )
         changes_by_path: dict[str, dict[int, int]] = {}
-        for row in rows:
-            total = int(row["line_count"])
-            start = max(1, int(row["adjusted_start_line"]))
-            end = min(total, int(row["adjusted_end_line"]))
-            if end < start:
-                continue
-            path = str(row["path"])
-            changes = changes_by_path.setdefault(path, {})
-            changes[start] = changes.get(start, 0) + 1
-            changes[end + 1] = changes.get(end + 1, 0) - 1
+        for offset in range(0, len(session_ids), SQLITE_IN_CHUNK_SIZE):
+            chunk = session_ids[offset : offset + SQLITE_IN_CHUNK_SIZE]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""
+                SELECT
+                    events.path,
+                    events.adjusted_start_line,
+                    events.adjusted_end_line,
+                    files.line_count
+                FROM ac_read_events AS events
+                JOIN ac_files AS files
+                  ON files.project_id = ? AND files.path = events.path
+                WHERE events.session_id IN ({placeholders})
+                  AND events.status = 'succeeded'
+                  AND events.snapshot_tracked = 1
+                """,
+                [project_id, *chunk],
+            )
+            for row in rows:
+                total = int(row["line_count"])
+                start = max(1, int(row["adjusted_start_line"]))
+                end = min(total, int(row["adjusted_end_line"]))
+                if end < start:
+                    continue
+                path = str(row["path"])
+                changes = changes_by_path.setdefault(path, {})
+                changes[start] = changes.get(start, 0) + 1
+                changes[end + 1] = changes.get(end + 1, 0) - 1
 
         maximums: dict[str, int] = {}
         for path, changes in changes_by_path.items():

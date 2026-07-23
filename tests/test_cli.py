@@ -253,7 +253,6 @@ class CliTests(unittest.TestCase):
             "percent": 50.0,
             "covered_files": 4,
             "total_files": 10,
-            "tree": {},
         }
         with patch.object(cli, "AuditCovClient") as client_type:
             client_type.return_value.get.return_value = response
@@ -280,7 +279,7 @@ class CliTests(unittest.TestCase):
             base_url="http://127.0.0.1:9876", timeout=12.0
         )
         client_type.return_value.get.assert_called_once_with(
-            "/api/projects/7/coverage", {"session_id": [3, 5]}
+            "/api/projects/7/coverage-summary", {"session_id": [3, 5]}
         )
 
     def test_coverage_no_sessions_uses_explicit_empty_selection(self) -> None:
@@ -293,7 +292,6 @@ class CliTests(unittest.TestCase):
             "percent": 0.0,
             "covered_files": 0,
             "total_files": 10,
-            "tree": {},
         }
         with patch.object(cli, "AuditCovClient") as client_type:
             client_type.return_value.get.return_value = response
@@ -306,20 +304,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("0.00%", stdout)
         self.assertIn("0 / 340 lines", stdout)
         client_type.return_value.get.assert_called_once_with(
-            "/api/projects/7/coverage", {"selection": "none"}
+            "/api/projects/7/coverage-summary", {"selection": "none"}
         )
 
     def test_coverage_without_selection_requests_all_sessions(self) -> None:
         response = {
             "id": 7,
             "name": "Demo",
-            "selected_session_ids": [1, 2],
+            "selection": "all",
             "covered_lines": 340,
             "total_lines": 340,
             "percent": 100.0,
             "covered_files": 10,
             "total_files": 10,
-            "tree": {},
         }
         with patch.object(cli, "AuditCovClient") as client_type:
             client_type.return_value.get.return_value = response
@@ -329,6 +326,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.assertIn("100.00%", stdout)
         self.assertIn("340 / 340 lines", stdout)
+        self.assertIn("Selected sessions: all", stdout)
+        client_type.return_value.get.assert_called_once_with(
+            "/api/projects/7/coverage-summary", {}
+        )
+
+    def test_coverage_tree_preserves_full_tree_endpoint(self) -> None:
+        response = {
+            "id": 7,
+            "name": "Demo",
+            "selected_session_ids": [1, 2],
+            "covered_lines": 340,
+            "total_lines": 340,
+            "percent": 100.0,
+            "covered_files": 10,
+            "total_files": 10,
+            "tree": {"type": "directory"},
+        }
+        with patch.object(cli, "AuditCovClient") as client_type:
+            client_type.return_value.get.return_value = response
+            result, stdout, stderr = self.run_cli(
+                ["coverage", "7", "--tree", "--json"]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout)["tree"], {"type": "directory"})
         client_type.return_value.get.assert_called_once_with(
             "/api/projects/7/coverage", {}
         )
@@ -481,7 +504,8 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(created_status, 0)
         self.assertEqual(coverage_status, 0)
         self.assertEqual(project["name"], "Demo")
-        self.assertEqual(coverage["selected_session_ids"], [])
+        self.assertEqual(coverage["selection"], "all")
+        self.assertNotIn("tree", coverage)
         self.assertEqual(coverage["covered_lines"], 0)
         self.assertEqual(coverage["total_lines"], 2)
         self.assertEqual(delete_status, 0)

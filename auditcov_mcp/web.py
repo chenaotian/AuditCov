@@ -165,6 +165,13 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
         params = parse_qs(query)
         if len(parts) == 1:
             return self._with_store(lambda store: store.get_project(project_id))
+        if len(parts) == 2 and parts[1] == "coverage-summary":
+            selection = selected_session_ids(params)
+            return self._with_store(
+                lambda store: store.get_project_coverage_summary(project_id, selection)
+            )
+        if len(parts) != 2:
+            return self._send_json({"error": "not found"}, status=404)
         selection = selected_session_ids(params)
         if parts[1] == "coverage":
             return self._with_store(

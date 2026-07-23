@@ -3,6 +3,12 @@ const WORK_AREA_MIN_LEFT_WIDTH = 260;
 const WORK_AREA_MIN_CODE_WIDTH = 320;
 const WORK_AREA_RESIZE_STEP = 24;
 const WORK_AREA_DESKTOP_QUERY = "(min-width: 981px)";
+const ALL_FILES_INITIAL_LIMIT = 200;
+const ALL_FILES_BATCH_SIZE = 200;
+const FILE_PATH_COLLATOR = new Intl.Collator(undefined, {
+  sensitivity: "base",
+  numeric: true,
+});
 
 const state = {
   projects: [],
@@ -17,6 +23,13 @@ const state = {
   fileSortDirection: "desc",
   expandedTreePaths: new Set([""]),
   expandedSessionIds: new Set(),
+  allFilesVisibleLimit: ALL_FILES_INITIAL_LIMIT,
+  allFilesProjectId: null,
+  allFilesCache: null,
+  fileNavigationRows: new Map(),
+  projectRequestGeneration: 0,
+  coverageRequestGeneration: 0,
+  fileRequestGeneration: 0,
 };
 
 const ids = [
@@ -139,6 +152,7 @@ function setupFileNavigationControls() {
   els.allFilesViewButton.addEventListener("click", () => setFileViewMode("files"));
   els.fileSortSelect.addEventListener("change", () => {
     state.fileSortDirection = els.fileSortSelect.value === "asc" ? "asc" : "desc";
+    resetAllFilesView();
     if (state.coverage && state.fileViewMode === "files") renderTree(state.coverage.tree);
     saveState();
   });
@@ -146,7 +160,10 @@ function setupFileNavigationControls() {
 }
 
 function setFileViewMode(mode) {
-  state.fileViewMode = mode === "files" ? "files" : "tree";
+  const nextMode = mode === "files" ? "files" : "tree";
+  if (nextMode === state.fileViewMode) return;
+  state.fileViewMode = nextMode;
+  resetAllFilesView();
   updateFileNavigationControls();
   if (state.coverage) renderTree(state.coverage.tree);
   saveState();
@@ -199,6 +216,11 @@ async function loadProjects() {
 }
 
 async function loadProject(projectId) {
+  const requestGeneration = ++state.projectRequestGeneration;
+  // A project switch invalidates responses still in flight for the prior
+  // project, even when those HTTP requests cannot be cancelled server-side.
+  state.coverageRequestGeneration += 1;
+  state.fileRequestGeneration += 1;
   const changed = projectId !== state.selectedProjectId;
   state.selectedProjectId = projectId;
   if (changed) {
@@ -206,7 +228,12 @@ async function loadProject(projectId) {
     state.expandedTreePaths = new Set([""]);
     state.expandedSessionIds = new Set();
   }
-  state.detail = await fetchJson(`/api/projects/${projectId}`);
+  const detail = await fetchJson(`/api/projects/${projectId}`);
+  if (
+    requestGeneration !== state.projectRequestGeneration
+    || projectId !== state.selectedProjectId
+  ) return;
+  state.detail = detail;
   const available = new Set(state.detail.sessions.map((session) => session.id));
   const retained = [...state.selectedSessionIds].filter((id) => available.has(id));
   state.selectedSessionIds = new Set(retained.length ? retained : available);
@@ -215,32 +242,60 @@ async function loadProject(projectId) {
 }
 
 async function loadCoverage() {
+  const requestGeneration = ++state.coverageRequestGeneration;
+  const projectId = state.selectedProjectId;
+  const invalidatedFileGeneration = ++state.fileRequestGeneration;
   const params = selectionParams();
-  state.coverage = await fetchJson(
-    `/api/projects/${state.selectedProjectId}/coverage?${params.toString()}`,
+  const coverage = await fetchJson(
+    `/api/projects/${projectId}/coverage?${params.toString()}`,
   );
+  if (
+    requestGeneration !== state.coverageRequestGeneration
+    || projectId !== state.selectedProjectId
+  ) return;
+  state.coverage = coverage;
   renderProject();
   saveState();
-  if (state.selectedFilePath) {
+  if (
+    state.selectedFilePath
+    && state.fileRequestGeneration === invalidatedFileGeneration
+  ) {
     try { await loadFile(state.selectedFilePath); } catch (_error) { state.selectedFilePath = null; }
   }
 }
 
 async function loadFile(path) {
+  const requestGeneration = ++state.fileRequestGeneration;
+  const projectId = state.selectedProjectId;
   const params = selectionParams();
   params.set("path", path);
   const file = await fetchJson(
-    `/api/projects/${state.selectedProjectId}/file?${params.toString()}`,
+    `/api/projects/${projectId}/file?${params.toString()}`,
   );
+  if (
+    requestGeneration !== state.fileRequestGeneration
+    || projectId !== state.selectedProjectId
+  ) return;
+  const previousPath = state.selectedFilePath;
   state.selectedFilePath = path;
   expandParents(path);
-  renderTree(state.coverage.tree);
+  if (state.fileViewMode === "files") {
+    updateFileNavigationSelection(previousPath, path);
+  } else {
+    renderTree(state.coverage.tree);
+  }
   renderFile(file);
   saveState();
 }
 
 function selectionParams() {
   const params = new URLSearchParams();
+  const sessions = state.detail?.sessions || [];
+  const allSelected = (
+    sessions.length === state.selectedSessionIds.size
+    && sessions.every((session) => state.selectedSessionIds.has(session.id))
+  );
+  if (allSelected) return params;
   if (!state.selectedSessionIds.size) params.set("selection", "none");
   for (const id of state.selectedSessionIds) params.append("session_id", String(id));
   return params;
@@ -353,6 +408,9 @@ async function deleteProject(project, deleteButton) {
 }
 
 function clearProjectSelection() {
+  state.projectRequestGeneration += 1;
+  state.coverageRequestGeneration += 1;
+  state.fileRequestGeneration += 1;
   state.selectedProjectId = null;
   state.selectedSessionIds = new Set();
   state.selectedFilePath = null;
@@ -360,6 +418,7 @@ function clearProjectSelection() {
   state.coverage = null;
   state.expandedTreePaths = new Set([""]);
   state.expandedSessionIds = new Set();
+  resetAllFilesView();
 }
 
 function renderProject() {
@@ -514,6 +573,7 @@ function renderSessionNode(session, childrenByParent, rendered) {
 function renderTree(root) {
   updateFileNavigationControls();
   els.treeView.className = "tree-view";
+  state.fileNavigationRows = new Map();
   if (state.fileViewMode === "files") {
     renderAllFiles(root);
     return;
@@ -538,41 +598,126 @@ function renderTreeNode(node) {
   row.children[3].title = node.path || node.name;
   row.children[4].textContent = formatPercent(node.percent);
   wrapper.appendChild(row);
-  const children = document.createElement("div");
-  children.className = `tree-children${expanded ? "" : " collapsed"}`;
-  for (const child of node.children || []) children.appendChild(renderTreeNode(child));
+  if (expanded) {
+    const children = document.createElement("div");
+    children.className = "tree-children";
+    for (const child of node.children || []) children.appendChild(renderTreeNode(child));
+    wrapper.appendChild(children);
+  }
   row.addEventListener("click", () => {
     if (expanded) state.expandedTreePaths.delete(key); else state.expandedTreePaths.add(key);
     renderTree(state.coverage.tree);
     saveState();
   });
-  wrapper.appendChild(children);
   return wrapper;
 }
 
 function renderAllFiles(root) {
-  const files = collectFileNodes(root);
-  files.sort((left, right) => {
-    const difference = state.fileSortDirection === "asc"
-      ? fileMaxReadCount(left) - fileMaxReadCount(right)
-      : fileMaxReadCount(right) - fileMaxReadCount(left);
-    if (difference) return difference;
-    return String(left.path).localeCompare(String(right.path), undefined, {
-      sensitivity: "base",
-      numeric: true,
-    });
-  });
-  const fragment = document.createDocumentFragment();
-  for (const file of files) {
-    fragment.appendChild(renderFileNavigationNode(file, file.path, " flat-file-row"));
+  if (state.allFilesProjectId !== state.selectedProjectId) {
+    resetAllFilesView();
+    state.allFilesProjectId = state.selectedProjectId;
+    els.treeView.scrollTop = 0;
   }
-  if (!files.length) {
+  const entries = sortedAllFileEntries(root);
+  const visibleCount = Math.min(state.allFilesVisibleLimit, entries.length);
+  const fragment = renderAllFileRange(entries, 0, visibleCount);
+  if (!entries.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = "No source files in this project snapshot.";
     fragment.appendChild(empty);
+  } else if (visibleCount < entries.length) {
+    fragment.appendChild(renderAllFilesLoadMore(entries, visibleCount));
   }
   els.treeView.replaceChildren(fragment);
+}
+
+function sortedAllFileEntries(root) {
+  const cached = state.allFilesCache;
+  if (
+    cached
+    && cached.root === root
+    && cached.direction === state.fileSortDirection
+  ) {
+    return cached.entries;
+  }
+  const entries = collectFileNodes(root).map((file) => ({
+    file,
+    count: fileMaxReadCount(file),
+    path: String(file.path),
+  }));
+  entries.sort((left, right) => {
+    const difference = state.fileSortDirection === "asc"
+      ? left.count - right.count
+      : right.count - left.count;
+    if (difference) return difference;
+    return FILE_PATH_COLLATOR.compare(left.path, right.path);
+  });
+  state.allFilesCache = {
+    root,
+    direction: state.fileSortDirection,
+    entries,
+  };
+  return entries;
+}
+
+function renderAllFileRange(entries, start, end) {
+  const fragment = document.createDocumentFragment();
+  for (let index = start; index < end; index += 1) {
+    const file = entries[index].file;
+    fragment.appendChild(renderFileNavigationNode(file, file.path, " flat-file-row"));
+  }
+  return fragment;
+}
+
+function renderAllFilesLoadMore(entries, renderedCount) {
+  const wrapper = document.createElement("div");
+  const button = document.createElement("button");
+  const updateLabel = () => {
+    const remaining = entries.length - renderedCount;
+    button.textContent = `Load more files (${remaining} remaining)`;
+    button.setAttribute(
+      "aria-label",
+      `Load up to ${Math.min(ALL_FILES_BATCH_SIZE, remaining)} more files; ${remaining} remaining`,
+    );
+  };
+  wrapper.className = "all-files-load-more";
+  button.type = "button";
+  button.className = "small-button";
+  updateLabel();
+  button.addEventListener("click", () => {
+    const nextCount = Math.min(entries.length, renderedCount + ALL_FILES_BATCH_SIZE);
+    wrapper.before(renderAllFileRange(entries, renderedCount, nextCount));
+    renderedCount = nextCount;
+    state.allFilesVisibleLimit = nextCount;
+    if (renderedCount >= entries.length) {
+      wrapper.remove();
+    } else {
+      updateLabel();
+    }
+  });
+  wrapper.appendChild(button);
+  return wrapper;
+}
+
+function resetAllFilesView() {
+  state.allFilesVisibleLimit = ALL_FILES_INITIAL_LIMIT;
+  state.allFilesProjectId = null;
+  state.allFilesCache = null;
+  if (els.treeView) els.treeView.scrollTop = 0;
+}
+
+function updateFileNavigationSelection(previousPath, nextPath) {
+  const previousRow = state.fileNavigationRows.get(previousPath);
+  if (previousRow) {
+    previousRow.classList.remove("active");
+    previousRow.removeAttribute("aria-current");
+  }
+  const nextRow = state.fileNavigationRows.get(nextPath);
+  if (nextRow) {
+    nextRow.classList.add("active");
+    nextRow.setAttribute("aria-current", "true");
+  }
 }
 
 function collectFileNodes(node, files = []) {
@@ -596,6 +741,7 @@ function renderFileNavigationNode(node, displayName, extraClass = "") {
   row.children[3].textContent = displayName;
   row.children[3].title = node.path;
   row.children[4].textContent = formatPercent(node.percent);
+  state.fileNavigationRows.set(node.path, row);
   const readLabel = maxReadCount === 1 ? "1 read" : `${maxReadCount} reads`;
   row.setAttribute(
     "aria-label",

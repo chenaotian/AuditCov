@@ -723,6 +723,16 @@ body.resizing-work-area * {
   font-size: 11px;
 }
 
+.all-files-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 10px 6px 4px;
+}
+
+.all-files-load-more .small-button {
+  min-width: 190px;
+}
+
 .tree-percent {
   color: var(--muted);
   font-family: var(--mono);

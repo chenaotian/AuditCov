@@ -257,6 +257,75 @@ class WebStaticTests(unittest.TestCase):
         self.assertRegex(self.css, r"\.project-delete:focus-visible")
         self.assertRegex(self.css, r"\.project-delete:disabled")
 
+    def test_file_navigation_defaults_to_directory_and_exposes_sort_controls(self) -> None:
+        parser = _ElementCollector()
+        parser.feed(self.html)
+
+        directory_tag, directory = parser.by_id["directoryViewButton"]
+        files_tag, files = parser.by_id["allFilesViewButton"]
+        sort_tag, sort = parser.by_id["fileSortSelect"]
+        self.assertEqual((directory_tag, files_tag, sort_tag), ("button", "button", "select"))
+        self.assertEqual(directory.get("aria-pressed"), "true")
+        self.assertEqual(files.get("aria-pressed"), "false")
+        self.assertIn("hidden", sort)
+        self.assertIn("maximum single-line read count", sort["aria-label"].lower())
+        self.assertRegex(self.javascript, r'fileViewMode\s*:\s*["\']tree["\']')
+        self.assertRegex(self.javascript, r'fileSortDirection\s*:\s*["\']desc["\']')
+
+    def test_file_navigation_flat_mode_sorts_by_peak_then_path(self) -> None:
+        render_tree = self.javascript_function("renderTree")
+        render_all = self.javascript_function("renderAllFiles")
+        self.assertIn('state.fileViewMode === "files"', render_tree)
+        self.assertIn("collectFileNodes(root)", render_all)
+        self.assertIn('state.fileSortDirection === "asc"', render_all)
+        self.assertRegex(
+            render_all,
+            r"fileMaxReadCount\(left\)\s*-\s*fileMaxReadCount\(right\)",
+        )
+        self.assertRegex(
+            render_all,
+            r"fileMaxReadCount\(right\)\s*-\s*fileMaxReadCount\(left\)",
+        )
+        difference_check = render_all.index("if (difference) return difference;")
+        path_tie_break = render_all.index(".localeCompare(", difference_check)
+        self.assertLess(difference_check, path_tie_break)
+        self.assertIn("file.path", render_all)
+
+    def test_file_peak_badges_show_zero_red_and_positive_green_depth(self) -> None:
+        render_node = self.javascript_function("renderFileNavigationNode")
+        render_badge = self.javascript_function("renderFileReadBadge")
+        color = self.javascript_function("fileReadCountColor")
+        self.assertIn("fileMaxReadCount(node)", render_node)
+        self.assertIn("max_read_count", self.javascript_function("fileMaxReadCount"))
+        self.assertIn('count > 0 ? "read" : "unread"', render_badge)
+        self.assertIn("--file-read-color", render_badge)
+        self.assertIn("Math.exp", color)
+        self.assertRegex(
+            self.css,
+            r"\.file-read-badge\.unread\s*\{[^}]*color\s*:\s*var\(--missed\)",
+        )
+        self.assertRegex(
+            self.css,
+            r"\.file-read-badge\s*\{[^}]*color\s*:\s*"
+            r"var\(--file-read-color,\s*var\(--covered\)\)",
+        )
+        badge_position = render_node.index("file-read-badge")
+        name_position = render_node.index("tree-name", badge_position)
+        self.assertLess(badge_position, name_position)
+
+    def test_file_navigation_preferences_and_accessibility_are_preserved(self) -> None:
+        save_state = self.javascript_function("saveState")
+        restore_state = self.javascript_function("restoreState")
+        tree_node = self.javascript_function("renderTreeNode")
+        file_node = self.javascript_function("renderFileNavigationNode")
+        for field in ("fileViewMode", "fileSortDirection"):
+            self.assertIn(field, save_state)
+            self.assertIn(field, restore_state)
+        self.assertIn('setAttribute("aria-expanded"', tree_node)
+        self.assertIn('setAttribute("aria-current"', file_node)
+        self.assertIn('maxReadCount === 1 ? "1 read"', file_node)
+        self.assertIn("maximum ${readLabel} on one line", file_node)
+
 
 if __name__ == "__main__":
     unittest.main()

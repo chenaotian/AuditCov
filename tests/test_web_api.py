@@ -79,6 +79,22 @@ class WebApiTests(unittest.TestCase):
         self.request(
             "POST", "/api/read/after", {**second_payload, "success": True, "tool_result": {}}
         )
+        _, coverage = self.request(
+            "GET",
+            f"/api/projects/{project['id']}/coverage"
+            f"?session_id={before['session_id']}",
+        )
+        file_nodes = []
+        pending = [coverage["tree"]]
+        while pending:
+            node = pending.pop()
+            if node["type"] == "file":
+                file_nodes.append(node)
+            pending.extend(node.get("children", []))
+        self.assertEqual(len(file_nodes), 1)
+        self.assertEqual(file_nodes[0]["path"], "main.py")
+        self.assertEqual(file_nodes[0]["max_read_count"], 2)
+
         _, file_view = self.request(
             "GET",
             f"/api/projects/{project['id']}/file"

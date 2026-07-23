@@ -224,6 +224,47 @@ class StoreTests(unittest.TestCase):
             [line["read_count"] for line in empty_view["lines"]], [0, 0, 0, 0]
         )
 
+        def file_node(session_ids: list[int]) -> dict[str, object]:
+            tree = self.store.get_project_tree(self.project["id"], session_ids)["tree"]
+            pending = [tree]
+            while pending:
+                node = pending.pop()
+                if node.get("path") == "src/a.py":
+                    return node
+                pending.extend(node.get("children", []))
+            self.fail("src/a.py is missing from the coverage tree")
+
+        self.assertEqual(file_node([first_id])["max_read_count"], 2)
+        self.assertEqual(file_node([first_id, second_id])["max_read_count"], 2)
+        self.assertEqual(file_node([second_id])["max_read_count"], 1)
+        self.assertEqual(file_node([])["max_read_count"], 0)
+
+    def test_project_tree_groups_peak_read_counts_for_every_file(self) -> None:
+        multi_repo = self.root / "multi"
+        multi_repo.mkdir()
+        for name in ("a.py", "b.py", "c.py"):
+            (multi_repo / name).write_text("one\ntwo\nthree\n", encoding="utf-8")
+        project = self.store.create_project(str(multi_repo), "Multi")
+        context = AgentContext("claude-code", "multi-session")
+
+        self.store.prepare_read(context, "a-first", str(multi_repo / "a.py"), 1, 2)
+        self.store.complete_read(context, "a-first", str(multi_repo / "a.py"), True)
+        self.store.prepare_read(context, "a-second", str(multi_repo / "a.py"), 2, 3)
+        self.store.complete_read(context, "a-second", str(multi_repo / "a.py"), True)
+        self.store.prepare_read(context, "b-once", str(multi_repo / "b.py"), 1, 3)
+        self.store.complete_read(context, "b-once", str(multi_repo / "b.py"), True)
+
+        tree = self.store.get_project_tree(project["id"])["tree"]
+        files = {}
+        pending = [tree]
+        while pending:
+            node = pending.pop()
+            if node["type"] == "file":
+                files[node["path"]] = node["max_read_count"]
+            pending.extend(node.get("children", []))
+
+        self.assertEqual(files, {"a.py": 2, "b.py": 1, "c.py": 0})
+
     def test_project_coverage_batches_range_queries_for_large_snapshots(self) -> None:
         with self.store.conn:
             self.store.conn.executemany(
@@ -252,7 +293,13 @@ class StoreTests(unittest.TestCase):
             for statement in statements
             if "FROM ac_covered_ranges AS ranges" in statement
         ]
+        read_count_queries = [
+            statement
+            for statement in statements
+            if "FROM ac_read_events AS events" in statement
+        ]
         self.assertEqual(len(range_queries), 2)
+        self.assertEqual(len(read_count_queries), 1)
         self.assertEqual(summary["projects"][0]["covered_lines"], 1)
         self.assertEqual(tree["covered_lines"], 1)
 

@@ -454,14 +454,23 @@ class AuditCovStore:
         project = self._require_project(project_id)
         selected = self._validated_session_ids(project_id, session_ids)
         ranges_by_path = self._aggregate_ranges_by_path(project_id, selected)
+        max_read_counts = self._max_read_counts_by_path(project_id, selected)
         files = []
         for row in self.conn.execute(
             "SELECT * FROM ac_files WHERE project_id = ? ORDER BY path", (project_id,)
         ):
-            ranges = ranges_by_path.get(str(row["path"]), [])
+            path = str(row["path"])
+            ranges = ranges_by_path.get(path, [])
             total = int(row["line_count"])
             covered = range_size(ranges)
-            files.append(file_coverage(str(row["path"]), total, covered))
+            files.append(
+                file_coverage(
+                    path,
+                    total,
+                    covered,
+                    max_read_counts.get(path, 0),
+                )
+            )
         return {
             **self._project_values(project),
             "selected_session_ids": selected,
@@ -1044,6 +1053,51 @@ class AuditCovStore:
             changes[end + 1] = changes.get(end + 1, 0) - 1
         return changes
 
+    def _max_read_counts_by_path(
+        self, project_id: int, session_ids: list[int]
+    ) -> dict[str, int]:
+        """Return each snapshot file's highest per-line successful read count."""
+        if not session_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in session_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                events.path,
+                events.adjusted_start_line,
+                events.adjusted_end_line,
+                files.line_count
+            FROM ac_read_events AS events
+            JOIN ac_files AS files
+              ON files.project_id = ? AND files.path = events.path
+            WHERE events.session_id IN ({placeholders})
+              AND events.status = 'succeeded'
+              AND events.snapshot_tracked = 1
+            """,
+            [project_id, *session_ids],
+        )
+        changes_by_path: dict[str, dict[int, int]] = {}
+        for row in rows:
+            total = int(row["line_count"])
+            start = max(1, int(row["adjusted_start_line"]))
+            end = min(total, int(row["adjusted_end_line"]))
+            if end < start:
+                continue
+            path = str(row["path"])
+            changes = changes_by_path.setdefault(path, {})
+            changes[start] = changes.get(start, 0) + 1
+            changes[end + 1] = changes.get(end + 1, 0) - 1
+
+        maximums: dict[str, int] = {}
+        for path, changes in changes_by_path.items():
+            count = 0
+            maximum = 0
+            for line_number in sorted(changes):
+                count += changes[line_number]
+                maximum = max(maximum, count)
+            maximums[path] = maximum
+        return maximums
+
     def _merge_covered_range(
         self, session_id: int, path: str, start_line: int, end_line: int
     ) -> None:
@@ -1238,7 +1292,9 @@ def percent(covered: int, total: int) -> float:
     return 100.0 if total == 0 else round(covered * 100 / total, 2)
 
 
-def file_coverage(path: str, total: int, covered: int) -> dict[str, Any]:
+def file_coverage(
+    path: str, total: int, covered: int, max_read_count: int = 0
+) -> dict[str, Any]:
     return {
         "path": path,
         "total_lines": total,
@@ -1246,6 +1302,7 @@ def file_coverage(path: str, total: int, covered: int) -> dict[str, Any]:
         "percent": percent(covered, total),
         "covered_files": 1 if covered else 0,
         "total_files": 1,
+        "max_read_count": max(0, int(max_read_count)),
     }
 
 
@@ -1276,7 +1333,8 @@ def build_tree(files: list[dict[str, Any]], root_name: str) -> dict[str, Any]:
             parent = directory
         node = new_tree_node("file", parts[-1], info["path"])
         node.update({key: info[key] for key in (
-            "covered_lines", "total_lines", "percent", "covered_files", "total_files"
+            "covered_lines", "total_lines", "percent", "covered_files", "total_files",
+            "max_read_count",
         )})
         nodes[parent]["children"].append(node)
         for index in range(len(parts)):

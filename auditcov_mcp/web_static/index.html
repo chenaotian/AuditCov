@@ -55,7 +55,19 @@
               <section id="threadSelector" class="thread-selector empty-state">Select a project to choose agent sessions.</section>
             </section>
             <div class="tree-panel">
-              <div class="panel-title">Project snapshot</div>
+              <div class="tree-panel-header">
+                <div class="panel-title">Project snapshot</div>
+                <div class="file-navigation-controls">
+                  <div class="file-view-toggle" role="group" aria-label="File display mode">
+                    <button id="directoryViewButton" class="small-button file-view-button active" type="button" aria-pressed="true">Directory</button>
+                    <button id="allFilesViewButton" class="small-button file-view-button" type="button" aria-pressed="false">All files</button>
+                  </div>
+                  <select id="fileSortSelect" class="file-sort-select" aria-label="Sort all files by maximum single-line read count" hidden>
+                    <option value="desc">Highest first</option>
+                    <option value="asc">Lowest first</option>
+                  </select>
+                </div>
+              </div>
               <div id="treeView" class="tree-view empty-state">No initialized projects found.</div>
             </div>
           </div>

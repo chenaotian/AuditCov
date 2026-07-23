@@ -13,6 +13,8 @@ const state = {
   coverage: null,
   settings: null,
   leftColumnWidth: null,
+  fileViewMode: "tree",
+  fileSortDirection: "desc",
   expandedTreePaths: new Set([""]),
   expandedSessionIds: new Set(),
 };
@@ -22,13 +24,15 @@ const ids = [
   "projectCreateButton", "projectMessage", "workdirForm", "workdirInput",
   "workdirButton", "settingsMeta", "settingsMessage", "projectList",
   "projectKicker", "projectTitle", "projectMeta", "metricGrid",
-  "threadSelector", "treeView", "filePath", "fileStats", "codeView",
+  "threadSelector", "directoryViewButton", "allFilesViewButton",
+  "fileSortSelect", "treeView", "filePath", "fileStats", "codeView",
   "workArea", "leftColumn", "workAreaResizer",
 ];
 const els = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
 restoreState();
 setupWorkAreaResizer();
+setupFileNavigationControls();
 els.refreshButton.addEventListener("click", loadProjects);
 els.projectForm.addEventListener("submit", createProject);
 els.workdirForm.addEventListener("submit", moveWorkdir);
@@ -128,6 +132,35 @@ function resizeWorkAreaFromKeyboard(event) {
   event.preventDefault();
   setLeftColumnWidth(next);
   saveState();
+}
+
+function setupFileNavigationControls() {
+  els.directoryViewButton.addEventListener("click", () => setFileViewMode("tree"));
+  els.allFilesViewButton.addEventListener("click", () => setFileViewMode("files"));
+  els.fileSortSelect.addEventListener("change", () => {
+    state.fileSortDirection = els.fileSortSelect.value === "asc" ? "asc" : "desc";
+    if (state.coverage && state.fileViewMode === "files") renderTree(state.coverage.tree);
+    saveState();
+  });
+  updateFileNavigationControls();
+}
+
+function setFileViewMode(mode) {
+  state.fileViewMode = mode === "files" ? "files" : "tree";
+  updateFileNavigationControls();
+  if (state.coverage) renderTree(state.coverage.tree);
+  saveState();
+}
+
+function updateFileNavigationControls() {
+  const directoryMode = state.fileViewMode !== "files";
+  els.directoryViewButton.classList.toggle("active", directoryMode);
+  els.directoryViewButton.setAttribute("aria-pressed", String(directoryMode));
+  els.allFilesViewButton.classList.toggle("active", !directoryMode);
+  els.allFilesViewButton.setAttribute("aria-pressed", String(!directoryMode));
+  els.fileSortSelect.value = state.fileSortDirection === "asc" ? "asc" : "desc";
+  els.fileSortSelect.hidden = directoryMode;
+  els.fileSortSelect.disabled = directoryMode;
 }
 
 async function createProject(event) {
@@ -479,28 +512,32 @@ function renderSessionNode(session, childrenByParent, rendered) {
 }
 
 function renderTree(root) {
+  updateFileNavigationControls();
   els.treeView.className = "tree-view";
+  if (state.fileViewMode === "files") {
+    renderAllFiles(root);
+    return;
+  }
   els.treeView.replaceChildren(renderTreeNode(root));
 }
 
 function renderTreeNode(node) {
+  if (node.type === "file") return renderFileNavigationNode(node, node.name);
+
   const wrapper = document.createElement("div");
   const row = document.createElement("button");
   const key = node.path || "";
-  const directory = node.type !== "file";
-  const expanded = directory && state.expandedTreePaths.has(key);
+  const expanded = state.expandedTreePaths.has(key);
   row.type = "button";
-  row.className = `tree-row${node.path === state.selectedFilePath ? " active" : ""}`;
-  row.innerHTML = '<div class="tree-marker"></div><div class="tree-kind"></div><div class="tree-name"></div><div class="tree-percent"></div>';
-  row.children[0].textContent = directory ? (expanded ? "-" : "+") : "";
-  row.children[1].textContent = directory ? "DIR" : "FILE";
-  row.children[2].textContent = node.name;
-  row.children[3].textContent = formatPercent(node.percent);
+  row.className = "tree-row directory-row";
+  row.setAttribute("aria-expanded", String(expanded));
+  row.innerHTML = '<div class="tree-marker"></div><div class="tree-kind"></div><div class="file-read-badge placeholder" aria-hidden="true"></div><div class="tree-name"></div><div class="tree-percent"></div>';
+  row.children[0].textContent = expanded ? "-" : "+";
+  row.children[1].textContent = "DIR";
+  row.children[3].textContent = node.name;
+  row.children[3].title = node.path || node.name;
+  row.children[4].textContent = formatPercent(node.percent);
   wrapper.appendChild(row);
-  if (!directory) {
-    row.addEventListener("click", () => loadFile(node.path));
-    return wrapper;
-  }
   const children = document.createElement("div");
   children.className = `tree-children${expanded ? "" : " collapsed"}`;
   for (const child of node.children || []) children.appendChild(renderTreeNode(child));
@@ -511,6 +548,74 @@ function renderTreeNode(node) {
   });
   wrapper.appendChild(children);
   return wrapper;
+}
+
+function renderAllFiles(root) {
+  const files = collectFileNodes(root);
+  files.sort((left, right) => {
+    const difference = state.fileSortDirection === "asc"
+      ? fileMaxReadCount(left) - fileMaxReadCount(right)
+      : fileMaxReadCount(right) - fileMaxReadCount(left);
+    if (difference) return difference;
+    return String(left.path).localeCompare(String(right.path), undefined, {
+      sensitivity: "base",
+      numeric: true,
+    });
+  });
+  const fragment = document.createDocumentFragment();
+  for (const file of files) {
+    fragment.appendChild(renderFileNavigationNode(file, file.path, " flat-file-row"));
+  }
+  if (!files.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No source files in this project snapshot.";
+    fragment.appendChild(empty);
+  }
+  els.treeView.replaceChildren(fragment);
+}
+
+function collectFileNodes(node, files = []) {
+  if (node.type === "file") {
+    files.push(node);
+    return files;
+  }
+  for (const child of node.children || []) collectFileNodes(child, files);
+  return files;
+}
+
+function renderFileNavigationNode(node, displayName, extraClass = "") {
+  const wrapper = document.createElement("div");
+  const row = document.createElement("button");
+  const maxReadCount = fileMaxReadCount(node);
+  row.type = "button";
+  row.className = `tree-row file-row${extraClass}${node.path === state.selectedFilePath ? " active" : ""}`;
+  row.innerHTML = '<div class="tree-marker"></div><div class="tree-kind"></div><div class="file-read-badge"></div><div class="tree-name"></div><div class="tree-percent"></div>';
+  row.children[1].textContent = "FILE";
+  renderFileReadBadge(row.children[2], maxReadCount);
+  row.children[3].textContent = displayName;
+  row.children[3].title = node.path;
+  row.children[4].textContent = formatPercent(node.percent);
+  const readLabel = maxReadCount === 1 ? "1 read" : `${maxReadCount} reads`;
+  row.setAttribute(
+    "aria-label",
+    `${node.path}; maximum ${readLabel} on one line; ${formatPercent(node.percent)} coverage`,
+  );
+  if (node.path === state.selectedFilePath) row.setAttribute("aria-current", "true");
+  row.addEventListener("click", () => loadFile(node.path));
+  wrapper.appendChild(row);
+  return wrapper;
+}
+
+function renderFileReadBadge(badge, count) {
+  const label = count === 1
+    ? "Maximum single-line read count: 1"
+    : `Maximum single-line read count: ${count}`;
+  badge.textContent = String(count);
+  badge.className = `file-read-badge ${count > 0 ? "read" : "unread"}`;
+  badge.title = label;
+  badge.setAttribute("aria-hidden", "true");
+  if (count > 0) badge.style.setProperty("--file-read-color", fileReadCountColor(count));
 }
 
 function renderFile(file) {
@@ -604,6 +709,17 @@ function normalizedReadCount(line) {
   const value = Number(line.read_count ?? (line.covered ? 1 : 0));
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
+function fileMaxReadCount(file) {
+  const value = Number(file.max_read_count ?? 0);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+function fileReadCountColor(readCount) {
+  // Keep 1 readable, make 1 -> 2 and 2 -> 3 visibly darker, then taper off.
+  const depth = 1 - Math.exp(-0.75 * (Math.max(1, readCount) - 1));
+  const saturation = 60 + depth * 16;
+  const lightness = 34 - depth * 16;
+  return `hsl(158 ${saturation}% ${lightness}%)`;
+}
 function readHeat(readCount) {
   // Front-load contrast so 1 -> 2 and 2 -> 3 reads are immediately visible,
   // then approach a stable dark green as the count keeps increasing.
@@ -629,6 +745,8 @@ function saveState() {
     selectedSessionIds: [...state.selectedSessionIds],
     selectedFilePath: state.selectedFilePath,
     leftColumnWidth: state.leftColumnWidth,
+    fileViewMode: state.fileViewMode,
+    fileSortDirection: state.fileSortDirection,
     expandedTreePaths: [...state.expandedTreePaths],
     expandedSessionIds: [...state.expandedSessionIds],
   }));
@@ -641,6 +759,12 @@ function restoreState() {
     if (typeof saved.selectedFilePath === "string") state.selectedFilePath = saved.selectedFilePath;
     if (Number.isFinite(Number(saved.leftColumnWidth)) && Number(saved.leftColumnWidth) > 0) {
       state.leftColumnWidth = Number(saved.leftColumnWidth);
+    }
+    if (saved.fileViewMode === "tree" || saved.fileViewMode === "files") {
+      state.fileViewMode = saved.fileViewMode;
+    }
+    if (saved.fileSortDirection === "asc" || saved.fileSortDirection === "desc") {
+      state.fileSortDirection = saved.fileSortDirection;
     }
     if (Array.isArray(saved.expandedTreePaths)) state.expandedTreePaths = new Set(saved.expandedTreePaths);
     if (Array.isArray(saved.expandedSessionIds)) state.expandedSessionIds = new Set(saved.expandedSessionIds);

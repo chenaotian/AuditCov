@@ -583,6 +583,52 @@ body.resizing-work-area * {
   padding: 12px;
 }
 
+.tree-panel-header {
+  display: grid;
+  gap: 8px;
+}
+
+.file-navigation-controls,
+.file-view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-navigation-controls {
+  justify-content: space-between;
+}
+
+.file-view-button {
+  min-height: 28px;
+  padding: 3px 8px;
+}
+
+.file-view-button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.file-sort-select {
+  min-width: 104px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 3px 6px;
+}
+
+.file-sort-select:focus-visible,
+.file-view-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .file-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -609,9 +655,9 @@ body.resizing-work-area * {
   display: grid;
   width: 100%;
   min-height: 32px;
-  grid-template-columns: 16px 44px minmax(0, 1fr) 64px;
+  grid-template-columns: 16px 38px 28px minmax(0, 1fr) 60px;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -640,10 +686,41 @@ body.resizing-work-area * {
   font-size: 10px;
 }
 
+.file-read-badge {
+  display: inline-grid;
+  min-width: 24px;
+  min-height: 22px;
+  place-items: center;
+  justify-self: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--file-read-color, var(--covered));
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.file-read-badge.unread {
+  background: var(--missed-soft);
+  color: var(--missed);
+}
+
+.file-read-badge.placeholder {
+  visibility: hidden;
+}
+
 .tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.flat-file-row .tree-name {
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 .tree-percent {

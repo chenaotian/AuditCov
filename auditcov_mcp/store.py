@@ -123,6 +123,27 @@ class AuditCovStore:
             )
         return self.get_project(project_id)
 
+    def delete_project(self, project_id: int) -> dict[str, Any]:
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            project = self._require_project(project_id)
+            result = {
+                "deleted": True,
+                "id": int(project["id"]),
+                "name": str(project["name"]),
+                "project_root": str(project["project_root"]),
+            }
+            cursor = self.conn.execute(
+                "DELETE FROM ac_projects WHERE id = ?", (int(project["id"]),)
+            )
+            if cursor.rowcount != 1:
+                raise AuditCovError(f"project does not exist: {project_id}")
+            self.conn.commit()
+            return result
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def list_projects(self) -> dict[str, Any]:
         projects = []
         for row in self.conn.execute("SELECT * FROM ac_projects ORDER BY created_at DESC"):

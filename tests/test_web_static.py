@@ -31,6 +31,53 @@ class WebStaticTests(unittest.TestCase):
         cls.javascript = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
         cls.css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
 
+    def javascript_function(self, name: str) -> str:
+        match = re.search(
+            rf"(?:async\s+)?function\s+{re.escape(name)}\s*\([^)]*\)\s*\{{",
+            self.javascript,
+        )
+        self.assertIsNotNone(match, f"missing JavaScript function: {name}")
+        assert match is not None
+        start = self.javascript.index("{", match.start())
+        depth = 0
+        for index in range(start, len(self.javascript)):
+            character = self.javascript[index]
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    return self.javascript[start + 1 : index]
+        self.fail(f"unterminated JavaScript function: {name}")
+
+    def javascript_call_closure(self, name: str) -> str:
+        pending = [name]
+        visited: set[str] = set()
+        bodies = []
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            try:
+                body = self.javascript_function(current)
+            except AssertionError:
+                continue
+            bodies.append(body)
+            for called in re.findall(r"\b([A-Za-z_$][\w$]*)\s*\(", body):
+                if called not in visited:
+                    pending.append(called)
+        return "\n".join(bodies)
+
+    def project_card_variable(self, class_name: str) -> str:
+        match = re.search(
+            rf"\b([A-Za-z_$][\w$]*)\.className\s*=\s*[`'\"]{re.escape(class_name)}",
+            self.javascript,
+        )
+        self.assertIsNotNone(match, f"missing dynamic .{class_name} element")
+        assert match is not None
+        return match.group(1)
+
     def test_work_area_resizer_has_accessible_structure(self) -> None:
         parser = _ElementCollector()
         parser.feed(self.html)
@@ -104,6 +151,111 @@ class WebStaticTests(unittest.TestCase):
             mobile_css,
             r"(?:#workAreaResizer|\.work-area-resizer)\s*\{[^}]*display\s*:\s*none",
         )
+
+    def test_project_delete_uses_sibling_select_and_delete_buttons(self) -> None:
+        item = self.project_card_variable("project-item")
+        select_button = self.project_card_variable("project-select")
+        delete_button = self.project_card_variable("project-delete")
+
+        self.assertRegex(
+            self.javascript,
+            rf"\b{re.escape(item)}\s*=\s*document\.createElement\(\s*['\"]div['\"]\s*\)",
+        )
+        for variable in (select_button, delete_button):
+            self.assertRegex(
+                self.javascript,
+                rf"\b{re.escape(variable)}\s*=\s*document\.createElement"
+                r"\(\s*['\"]button['\"]\s*\)",
+            )
+
+        appended_together = re.search(
+            rf"{re.escape(item)}\.append\(\s*{re.escape(select_button)}\s*,\s*"
+            rf"{re.escape(delete_button)}\s*\)",
+            self.javascript,
+        )
+        appended_separately = all(
+            re.search(
+                rf"{re.escape(item)}\.appendChild\(\s*{re.escape(variable)}\s*\)",
+                self.javascript,
+            )
+            for variable in (select_button, delete_button)
+        )
+        self.assertTrue(
+            appended_together or appended_separately,
+            "project-select and project-delete must be sibling controls",
+        )
+
+    def test_project_delete_requires_confirmation_and_disables_request_button(self) -> None:
+        delete_button = self.project_card_variable("project-delete")
+        lower_javascript = self.javascript.lower()
+
+        self.assertIn("window.confirm", self.javascript)
+        self.assertRegex(
+            lower_javascript,
+            re.compile(
+                r"(?:source|repository)(?: code)? files?[\s\S]{0,200}?"
+                r"(?:will|are|is|do|does) not (?:be )?deleted"
+                r"|will not delete (?:the )?(?:source|repository)(?: code)? files?"
+            ),
+        )
+        self.assertIn("cannot be undone", lower_javascript)
+        self.assertRegex(
+            self.javascript,
+            r"method\s*:\s*['\"]DELETE['\"]",
+        )
+        self.assertRegex(
+            self.javascript,
+            rf"{re.escape(delete_button)}\.disabled\s*=\s*true",
+        )
+        self.assertRegex(
+            self.javascript,
+            rf"{re.escape(delete_button)}\.disabled\s*=\s*false",
+        )
+
+    def test_project_delete_clears_current_and_last_project_state(self) -> None:
+        delete_project = self.javascript_function("deleteProject")
+        self.assertRegex(
+            delete_project,
+            r"state\.selectedProjectId\s*={2,3}\s*project\.id"
+            r"|project\.id\s*={2,3}\s*state\.selectedProjectId",
+        )
+
+        required_resets = (
+            r"state\.selectedProjectId\s*=\s*null",
+            r"state\.selectedSessionIds\s*=\s*new Set\(",
+            r"state\.selectedFilePath\s*=\s*null",
+            r"state\.detail\s*=\s*null",
+            r"state\.coverage\s*=\s*null",
+            r"state\.expandedTreePaths\s*=\s*new Set\(",
+            r"state\.expandedSessionIds\s*=\s*new Set\(",
+        )
+        delete_closure = self.javascript_call_closure("deleteProject")
+        empty_closure = self.javascript_call_closure("renderEmpty")
+        for reset in required_resets:
+            self.assertRegex(delete_closure, reset)
+            self.assertRegex(empty_closure, reset)
+        self.assertIn("saveState()", delete_closure)
+        self.assertIn("saveState()", empty_closure)
+
+    def test_project_delete_removes_stale_local_state_before_refresh(self) -> None:
+        delete_project = self.javascript_function("deleteProject")
+        prune = delete_project.index("state.projects = state.projects.filter")
+        render = delete_project.index("renderProjectList()", prune)
+        refresh = delete_project.index("await loadProjects()", render)
+        self.assertLess(prune, render)
+        self.assertLess(render, refresh)
+        self.assertIn(
+            "if (deletedSelectedProject || !state.projects.length) renderEmpty();",
+            delete_project,
+        )
+
+    def test_project_delete_styles_cover_hover_focus_and_disabled_states(self) -> None:
+        self.assertRegex(self.css, r"\.project-select\s*\{")
+        self.assertRegex(self.css, r"\.project-delete\s*\{")
+        self.assertRegex(self.css, r"\.project-item:focus-within")
+        self.assertRegex(self.css, r"\.project-delete:hover")
+        self.assertRegex(self.css, r"\.project-delete:focus-visible")
+        self.assertRegex(self.css, r"\.project-delete:disabled")
 
 
 if __name__ == "__main__":

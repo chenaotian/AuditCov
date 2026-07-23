@@ -140,6 +140,23 @@ class AuditCovWebHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._send_json({"error": str(exc)}, status=500)
 
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if not parsed.path.startswith("/api/projects/"):
+                return self._send_json({"error": "not found"}, status=404)
+            parts = parsed.path.removeprefix("/api/projects/").strip("/").split("/")
+            if len(parts) != 1:
+                return self._send_json({"error": "not found"}, status=404)
+            if not parts[0].isdigit():
+                raise AuditCovError("invalid project id")
+            project_id = int(parts[0])
+            return self._with_store(lambda store: store.delete_project(project_id))
+        except AuditCovError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except (OSError, ValueError) as exc:
+            self._send_json({"error": str(exc)}, status=500)
+
     def _handle_project_get(self, path: str, query: str) -> None:
         parts = path.removeprefix("/api/projects/").strip("/").split("/")
         if not parts or not parts[0].isdigit():

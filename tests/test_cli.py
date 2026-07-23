@@ -137,6 +137,67 @@ class CliTests(unittest.TestCase):
         self.assertIn("/srv/demo", stdout)
         self.assertIn("50.00%", stdout)
 
+    def test_project_delete_calls_client_and_prints_json(self) -> None:
+        response = {
+            "deleted": True,
+            "id": 7,
+            "name": "Demo",
+            "project_root": "/srv/demo",
+        }
+        with patch.object(cli, "AuditCovClient") as client_type:
+            client_type.return_value.delete.return_value = response
+            result, stdout, stderr = self.run_cli(
+                [
+                    "project",
+                    "delete",
+                    "7",
+                    "--yes",
+                    "--json",
+                    "--server-url",
+                    "http://127.0.0.1:9876",
+                    "--timeout",
+                    "15",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout), response)
+        client_type.assert_called_once_with(
+            base_url="http://127.0.0.1:9876", timeout=15.0
+        )
+        client_type.return_value.delete.assert_called_once_with("/api/projects/7")
+
+    def test_project_delete_human_output_identifies_deleted_project(self) -> None:
+        response = {
+            "deleted": True,
+            "id": 7,
+            "name": "Demo",
+            "project_root": "/srv/demo",
+        }
+        with patch.object(cli, "AuditCovClient") as client_type:
+            client_type.return_value.delete.return_value = response
+            result, stdout, stderr = self.run_cli(
+                ["project", "delete", "7", "--yes"]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("Deleted project 7", stdout)
+        self.assertIn("Demo", stdout)
+        self.assertIn("/srv/demo", stdout)
+        client_type.return_value.delete.assert_called_once_with("/api/projects/7")
+
+    def test_project_delete_requires_explicit_confirmation(self) -> None:
+        stderr = io.StringIO()
+        with patch.object(cli, "AuditCovClient") as client_type:
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                cli.main(["project", "delete", "7"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--yes", stderr.getvalue())
+        client_type.assert_not_called()
+
     def test_project_list_sessions_exposes_internal_and_native_ids(self) -> None:
         projects = {
             "db_path": "/state/auditcov.sqlite3",
@@ -324,9 +385,27 @@ class AuditCovClientQueryTests(unittest.TestCase):
         self.assertEqual(query["path"], ["src/a.py"])
         self.assertNotIn("ignored", query)
 
+    def test_delete_uses_http_delete_and_parses_json(self) -> None:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = (
+            b'{"deleted":true,"id":7,"name":"Demo","project_root":"/srv/demo"}'
+        )
+
+        with patch("auditcov_mcp.client.urlopen", return_value=response) as open_url:
+            result = AuditCovClient("http://127.0.0.1:8765").delete(
+                "/api/projects/7"
+            )
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["id"], 7)
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_method(), "DELETE")
+        self.assertEqual(request.full_url, "http://127.0.0.1:8765/api/projects/7")
+
 
 class CliIntegrationTests(unittest.TestCase):
-    def test_create_and_coverage_commands_use_the_live_server(self) -> None:
+    def test_create_coverage_and_delete_commands_use_the_live_server(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repository = root / "repository"
@@ -365,6 +444,35 @@ class CliIntegrationTests(unittest.TestCase):
                         ]
                     )
                 coverage = json.loads(stdout.getvalue())
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    delete_status = cli.main(
+                        [
+                            "project",
+                            "delete",
+                            str(project["id"]),
+                            "--yes",
+                            "--json",
+                            "--server-url",
+                            server_url,
+                        ]
+                    )
+                deleted = json.loads(stdout.getvalue())
+
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    list_status = cli.main(
+                        [
+                            "project",
+                            "list",
+                            "--json",
+                            "--server-url",
+                            server_url,
+                        ]
+                    )
+                projects_after_delete = json.loads(stdout.getvalue())
+                source_still_exists = (repository / "main.py").is_file()
             finally:
                 server.shutdown()
                 server.server_close()
@@ -376,6 +484,12 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(coverage["selected_session_ids"], [])
         self.assertEqual(coverage["covered_lines"], 0)
         self.assertEqual(coverage["total_lines"], 2)
+        self.assertEqual(delete_status, 0)
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["id"], project["id"])
+        self.assertEqual(list_status, 0)
+        self.assertEqual(projects_after_delete["projects"], [])
+        self.assertTrue(source_still_exists)
 
 
 if __name__ == "__main__":

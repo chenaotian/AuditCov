@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from auditcov_mcp.web import AuditCovWebHandler, AuditCovWebServer
@@ -87,6 +88,36 @@ class WebApiTests(unittest.TestCase):
             [line["read_count"] for line in file_view["lines"]], [1, 2, 1]
         )
         self.assertEqual(file_view["max_read_count"], 2)
+
+    def test_delete_project_returns_json_and_removes_it_from_list(self) -> None:
+        _, project = self.request(
+            "POST", "/api/projects", {"project_root": str(self.repo), "name": "Repo"}
+        )
+
+        status, deleted = self.request(
+            "DELETE", f"/api/projects/{project['id']}"
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["id"], project["id"])
+        self.assertEqual(deleted["name"], "Repo")
+        self.assertEqual(deleted["project_root"], str(self.repo.resolve()))
+
+        _, projects = self.request("GET", "/api/projects")
+        self.assertEqual(projects["projects"], [])
+        self.assertTrue((self.repo / "main.py").is_file())
+
+    def test_delete_rejects_nested_project_routes_without_deleting(self) -> None:
+        _, project = self.request(
+            "POST", "/api/projects", {"project_root": str(self.repo), "name": "Repo"}
+        )
+
+        with self.assertRaises(HTTPError) as raised:
+            self.request("DELETE", f"/api/projects/{project['id']}/coverage")
+        self.assertEqual(raised.exception.code, 404)
+
+        _, projects = self.request("GET", "/api/projects")
+        self.assertEqual([item["id"] for item in projects["projects"]], [project["id"]])
 
     def test_read_outside_projects_is_ignored(self) -> None:
         outside = self.root / "outside.py"

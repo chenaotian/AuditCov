@@ -189,20 +189,62 @@ button {
 }
 
 .project-item {
+  position: relative;
   width: 100%;
   border: 1px solid #3c3d3d;
   border-radius: 6px;
   background: #222324;
   color: #f8f4ea;
-  cursor: pointer;
-  padding: 10px;
-  text-align: left;
 }
 
 .project-item:hover,
+.project-item:focus-within,
 .project-item.active {
   border-color: #f4c95d;
   background: #2d2e2f;
+}
+
+.project-select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 10px 66px 10px 10px;
+  text-align: left;
+}
+
+.project-select:focus-visible {
+  outline: 2px solid #f4c95d;
+  outline-offset: -2px;
+}
+
+.project-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border: 1px solid #81534e;
+  border-radius: 4px;
+  background: #352524;
+  color: #f0a296;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 9px;
+  padding: 4px 6px;
+}
+
+.project-delete:hover,
+.project-delete:focus-visible {
+  border-color: #f0a296;
+  background: #512f2d;
+  outline: none;
+}
+
+.project-delete:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .project-name {

@@ -44,6 +44,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_connection_arguments(list_projects)
     list_projects.set_defaults(handler=show_projects)
 
+    delete = project_commands.add_parser(
+        "delete", help="Permanently delete a project and all of its AuditCov data."
+    )
+    delete.add_argument("project_id", type=positive_int, help="Numeric project ID.")
+    delete.add_argument(
+        "--yes",
+        action="store_true",
+        required=True,
+        help="Confirm permanent deletion without an interactive prompt.",
+    )
+    add_output_argument(delete)
+    add_connection_arguments(delete)
+    delete.set_defaults(handler=delete_project)
+
     coverage = commands.add_parser(
         "coverage", help="Get aggregate objective read coverage for a project."
     )
@@ -171,6 +185,18 @@ def show_projects(args: argparse.Namespace) -> dict[str, Any]:
                 f"{session['agent_session_id']}\tparent={parent}\t"
                 f"{format_percent(session)}\t{title}"
             )
+    return payload
+
+
+def delete_project(args: argparse.Namespace) -> dict[str, Any]:
+    payload = client_for(args).delete(f"/api/projects/{args.project_id}")
+    if args.json:
+        print_json(payload)
+    else:
+        print(f"Deleted project {payload['id']}: {payload['name']}")
+        print(f"Root: {payload['project_root']}")
+        print("AuditCov snapshot, sessions, reads, and coverage records were removed.")
+        print("Repository files were not deleted.")
     return payload
 
 

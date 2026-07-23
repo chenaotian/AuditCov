@@ -38,6 +38,94 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(AuditCovError, "must not overlap"):
             self.store.create_project(str(self.repo / "src"))
 
+    def test_delete_project_cascades_and_allows_recreating_the_same_root(self) -> None:
+        sibling_repo = self.root / "sibling"
+        sibling_repo.mkdir()
+        (sibling_repo / "other.py").write_text("other\n", encoding="utf-8")
+        sibling = self.store.create_project(str(sibling_repo), "Sibling")
+
+        source_path = str(self.repo / "src" / "a.py")
+        child = AgentContext(
+            "opencode",
+            "delete-child",
+            parent_agent_session_id="delete-parent",
+        )
+        self.store.prepare_read(child, "delete-call", source_path, 1, 3)
+        self.store.complete_read(child, "delete-call", source_path, True)
+        session_ids = [
+            int(row["id"])
+            for row in self.store.conn.execute(
+                "SELECT id FROM ac_sessions WHERE project_id = ?",
+                (self.project["id"],),
+            )
+        ]
+        self.assertEqual(len(session_ids), 2)
+        placeholders = ", ".join("?" for _ in session_ids)
+        self.assertEqual(
+            self.store.conn.execute(
+                f"SELECT COUNT(*) FROM ac_read_events "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.store.conn.execute(
+                f"SELECT COUNT(*) FROM ac_covered_ranges "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            ).fetchone()[0],
+            1,
+        )
+
+        deleted = self.store.delete_project(self.project["id"])
+
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["id"], self.project["id"])
+        self.assertEqual(deleted["name"], "Example")
+        self.assertEqual(deleted["project_root"], str(self.repo.resolve()))
+        self.assertEqual(
+            self.store.conn.execute(
+                "SELECT COUNT(*) FROM ac_files WHERE project_id = ?",
+                (self.project["id"],),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.store.conn.execute(
+                "SELECT COUNT(*) FROM ac_sessions WHERE project_id = ?",
+                (self.project["id"],),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.store.conn.execute(
+                f"SELECT COUNT(*) FROM ac_read_events "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.store.conn.execute(
+                f"SELECT COUNT(*) FROM ac_covered_ranges "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            list(self.store.conn.execute("PRAGMA foreign_key_check")),
+            [],
+        )
+
+        self.assertTrue((self.repo / "src" / "a.py").is_file())
+        self.assertEqual(self.store.get_project(sibling["id"])["name"], "Sibling")
+        recreated = self.store.create_project(str(self.repo), "Recreated")
+        self.assertNotEqual(recreated["id"], self.project["id"])
+        self.assertEqual(recreated["project_root"], str(self.repo.resolve()))
+        self.assertEqual(recreated["total_files"], 1)
+
     def test_unconfigured_and_non_source_reads_are_transparent(self) -> None:
         context = AgentContext("claude-code", "session-1")
         outside = self.root / "outside.py"

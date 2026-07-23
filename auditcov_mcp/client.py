@@ -39,6 +39,10 @@ class AuditCovClient:
         request = Request(self.base_url + path + ("?" + query if query else ""))
         return self._open(request)
 
+    def delete(self, path: str) -> dict[str, Any]:
+        request = Request(self.base_url + path, method="DELETE")
+        return self._open(request)
+
     def _open(self, request: Request) -> dict[str, Any]:
         try:
             with urlopen(request, timeout=self.timeout) as response:

@@ -250,22 +250,83 @@ function renderProjectList() {
     return els.projectList.appendChild(node);
   }
   for (const project of state.projects) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `project-item${project.id === state.selectedProjectId ? " active" : ""}`;
-    button.addEventListener("click", () => loadProject(project.id));
-    button.innerHTML = `
+    const item = document.createElement("div");
+    item.className = `project-item${project.id === state.selectedProjectId ? " active" : ""}`;
+    const selectButton = document.createElement("button");
+    selectButton.type = "button";
+    selectButton.className = "project-select";
+    selectButton.addEventListener("click", () => loadProject(project.id));
+    selectButton.innerHTML = `
       <div class="project-name"></div>
       <div class="project-thread"></div>
       <div class="project-root"></div>
       <div class="mini-bar"><div class="mini-bar-fill"></div></div>`;
-    button.querySelector(".project-name").textContent = project.name;
-    button.querySelector(".project-thread").textContent =
+    selectButton.querySelector(".project-name").textContent = project.name;
+    selectButton.querySelector(".project-thread").textContent =
       `${project.session_count} sessions | ${formatPercent(project.percent)}`;
-    button.querySelector(".project-root").textContent = project.project_root;
-    button.querySelector(".mini-bar-fill").style.width = `${clamp(project.percent)}%`;
-    els.projectList.appendChild(button);
+    selectButton.querySelector(".project-root").textContent = project.project_root;
+    selectButton.querySelector(".mini-bar-fill").style.width = `${clamp(project.percent)}%`;
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "project-delete";
+    deleteButton.textContent = "Delete";
+    deleteButton.title = `Delete project ${project.name}`;
+    deleteButton.setAttribute("aria-label", `Delete project ${project.name}`);
+    deleteButton.addEventListener("click", () => deleteProject(project, deleteButton));
+
+    item.append(selectButton, deleteButton);
+    els.projectList.appendChild(item);
   }
+}
+
+async function deleteProject(project, deleteButton) {
+  const confirmed = window.confirm(
+    `Delete AuditCov project "${project.name}"?\n\n` +
+    `This permanently deletes its snapshot, sessions, read events, and coverage records ` +
+    `from the local AuditCov database.\n\n` +
+    `Repository files at ${project.project_root} will not be deleted. ` +
+    `This action cannot be undone.`,
+  );
+  if (!confirmed) return;
+
+  deleteButton.disabled = true;
+  deleteButton.textContent = "Deleting...";
+  try {
+    await deleteJson(`/api/projects/${project.id}`);
+  } catch (error) {
+    deleteButton.disabled = false;
+    deleteButton.textContent = "Delete";
+    setMessage(els.projectMessage, error.message, "error");
+    return;
+  }
+
+  const deletedSelectedProject = project.id === state.selectedProjectId;
+  state.projects = state.projects.filter((item) => item.id !== project.id);
+  if (deletedSelectedProject) clearProjectSelection();
+  renderProjectList();
+  if (deletedSelectedProject || !state.projects.length) renderEmpty();
+  saveState();
+  setMessage(els.projectMessage, `Deleted ${project.name}.`, "ok");
+  try {
+    await loadProjects();
+  } catch (error) {
+    setMessage(
+      els.projectMessage,
+      `Deleted ${project.name}, but refreshing the project list failed: ${error.message}`,
+      "error",
+    );
+  }
+}
+
+function clearProjectSelection() {
+  state.selectedProjectId = null;
+  state.selectedSessionIds = new Set();
+  state.selectedFilePath = null;
+  state.detail = null;
+  state.coverage = null;
+  state.expandedTreePaths = new Set([""]);
+  state.expandedSessionIds = new Set();
 }
 
 function renderProject() {
@@ -488,16 +549,23 @@ function renderFile(file) {
 }
 
 function renderEmpty() {
-  state.detail = null;
-  state.coverage = null;
+  const hasProjects = state.projects.length > 0;
+  clearProjectSelection();
+  saveState();
   els.projectKicker.textContent = "No project selected";
   els.projectTitle.textContent = "Audit coverage viewer";
   els.projectMeta.textContent = "";
   els.metricGrid.replaceChildren();
   els.threadSelector.className = "thread-selector empty-state";
-  els.threadSelector.textContent = "Create a repository project first.";
+  els.threadSelector.textContent = hasProjects
+    ? "Select a project from the sidebar."
+    : "Create a repository project first.";
   els.treeView.className = "tree-view empty-state";
-  els.treeView.textContent = "No project snapshots found.";
+  els.treeView.textContent = hasProjects
+    ? "No project selected."
+    : "No project snapshots found.";
+  els.filePath.textContent = "Select a file from the target tree.";
+  els.fileStats.textContent = "";
   els.codeView.className = "code-view empty-state";
   els.codeView.textContent = "Tracked source coverage will appear here.";
 }
@@ -513,6 +581,13 @@ async function postJson(url, payload) {
   const response = await fetch(url, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
   });
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || `Request failed: ${response.status}`);
+  return data;
+}
+
+async function deleteJson(url) {
+  const response = await fetch(url, { method: "DELETE" });
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || `Request failed: ${response.status}`);
   return data;
